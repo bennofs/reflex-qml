@@ -1,0 +1,54 @@
+name:          hsqml-react
+version:       0.1
+license:       BSD3
+license-file:  LICENSE
+cabal-version: >= 1.10
+author:        Benno Fünfstück
+maintainer:    Benno Fünfstück <benno.fuenfstueck@gmail.com>
+stability:     experimental
+homepage:      http://github.com/bennofs/hsqml-react/
+bug-reports:   http://github.com/bennofs/hsqml-react/issues
+copyright:     Copyright (C) 2014 Benno Fünfstück
+synopsis:      hsqml-react
+description:   hsqml-react
+build-type:    Custom
+
+extra-source-files:
+  .ghci
+  .gitignore
+  .travis.yml
+  .vim.custom
+  README.md
+
+source-repository head
+  type: git
+  location: https://github.com/bennofs/hsqml-react.git
+
+library
+  hs-source-dirs: src
+  default-language: Haskell2010
+  ghc-options: -Wall -fwarn-tabs
+  build-depends:
+      base >= 4.4 && < 5
+    , reactive-banana
+    , netwire
+    , hsqml
+    , containers
+    , text
+    , transformers
+    , these
+    , constraints
+    , void
+    , mtl
+
+test-suite doctests
+  type:    exitcode-stdio-1.0
+  main-is: doctests.hs
+  default-language: Haskell2010
+  build-depends:
+      base
+    , directory >= 1.0
+    , doctest >= 0.9.1
+    , filepath
+  ghc-options: -Wall -threaded
+  hs-source-dirs: tests
