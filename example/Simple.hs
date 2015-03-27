@@ -1,26 +1,31 @@
+{-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE DeriveGeneric #-}
 module Main where
 
-import Graphics.QML
+import Control.Concurrent
+import Control.Monad
+import GHC.Generics
+import Graphics.QML.Engine
 import Graphics.QML.React
+import Reactive.Banana
+import Reactive.Banana.Frameworks
 
-data App p = App
-  { counter      :: p View
-  , increment    :: p (Mut Int)
-  , controls     :: p (Static Controls)
-  , incrementNow :: p (Signal a)
-  , incremented  :: p (Int -> Int -> Bool)
-  } deriving Generic
+data App t = App
+  { time :: Member View Int t
+  , increment :: Member Mut Int t
+  } deriving Generic1
+instance QObject App
 
-data Controls p = App
-  { running :: p View
-  } 
+callEvery :: Int -> AddHandler ()
+callEvery delay = AddHandler $ \handler -> fmap killThread $ forkIO $
+  forever (handler () >> threadDelay delay)
+
+config :: EngineConfig
+config = defaultEngineConfig { initialDocument = fileDocument "/tmp/test.qml" }
 
 main :: IO ()
-main = do
-  network <- compile $ do
-    timer <- fromAddHandler (callEvery 10)
-    obj <- createObject $ \app -> App
-      <$> qml (accumB 0 ((+) <$ timer <@> value (increment app)))
-      <*> qml (stepper 1 (changed (increment app)))
-    
-  actuate network
+main = runQMLReact config $ qmlObject =<< do
+  timer <- fromAddHandler (callEvery 1000000)
+  App
+    <$> prop (\App{..} -> accumB 0 $ fmap (+) (behavior increment) <@ timer)
+    <*> prop (\App{..} -> stepper 1 $ changed increment)

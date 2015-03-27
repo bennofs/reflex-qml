@@ -6,11 +6,12 @@ cabal-version: >= 1.10
 author:        Benno Fünfstück
 maintainer:    Benno Fünfstück <benno.fuenfstueck@gmail.com>
 stability:     experimental
-homepage:      http://github.com/bennofs/hsqml-react/
+homepage:      http://github.com/bennofs/hsqml-react
 bug-reports:   http://github.com/bennofs/hsqml-react/issues
 copyright:     Copyright (C) 2014 Benno Fünfstück
-synopsis:      hsqml-react
-description:   hsqml-react
+synopsis:      Reactive banana interface for HsQML, a declarative UI framework from Qt
+description:
+  Provides a reactive-banana based interface to HsQML. Supports both read-only and mutable properties.
 build-type:    Custom
 
 extra-source-files:
@@ -40,6 +41,9 @@ library
     , constraints
     , void
     , mtl
+    , reflection
+  exposed-modules:
+    Graphics.QML.React
 
 test-suite doctests
   type:    exitcode-stdio-1.0
