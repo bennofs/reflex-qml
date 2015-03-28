@@ -1,17 +1,18 @@
-{-# LANGUAGE UndecidableInstances #-}
-{-# LANGUAGE FlexibleContexts #-}
-{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
-{-# LANGUAGE FunctionalDependencies #-}
-{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE DefaultSignatures #-}
-{-# LANGUAGE OverlappingInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE OverlappingInstances #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE TypeFamilies #-}
+{-# LANGUAGE TypeOperators #-}
+{-# LANGUAGE UndecidableInstances #-}
 -- | Reactive-banana based interface to HsQML
 module Graphics.QML.React
   ( -- * Running
@@ -29,14 +30,19 @@ module Graphics.QML.React
 
     -- * Members
   , Member()
+  , Static()
+  , static
+  , Var()
   , View()
   , Mut()
   , changed
-  , Static()
-  , static
-  , Def(), DefWith(), Final()
   , AsProperty(..)
   , HasBehavior(..)
+  , Fun()
+  , result
+  , MethodResult
+  , MethodSignature
+  , Def(), MemberDef(), DefWith(), Final()
   ) where
 
 import Control.Applicative
@@ -44,6 +50,7 @@ import Control.Concurrent.MVar
 import Control.Monad.Identity
 import Control.Monad.Writer hiding (Product)
 import Data.IORef
+import Data.Maybe
 import Data.Traversable (Traversable(traverse))
 import GHC.Generics
 import GHC.TypeLits
@@ -53,9 +60,13 @@ import Reactive.Banana.Frameworks
 import qualified Graphics.QML as Qml
 --------------------------------------------------------------------------------
 
--- | Compiles the supplied reactive-banana network, 'actuate's it and runs the QML engine
--- with the specified engine config (warning: the context object is overriden by
--- this function). This function will not return until the engine has terminated.
+-- | Run a reactive QML application.
+--
+-- This function compiles the supplied reactive-banana network, actuates it and
+-- runs the QML engine with the specified engine config.
+-- This function will not return until the engine has terminated.
+--
+-- warning: the context object configuration option is overriden by this function
 runQMLReact :: Qml.EngineConfig -> (forall t. Frameworks t => Moment t (QmlObject t o)) -> IO ()
 runQMLReact config networkDefinition = do
   objVar <- newEmptyMVar
@@ -121,12 +132,12 @@ qmlObject o = do
   let fixed = imapQObject fixMember o
 
       fixMember :: String -> Member k a (DefWith t o) -> Member k a (Final t)
-      fixMember name (Prop PropDef{..}) = Final (propRegister name outs) propIn outs
+      fixMember name (Def PropDef{..}) = Final (propRegister name outs) propIn outs
         where outs = propOutFun fixed
   (members, connectors :: [Qml.ObjRef () -> Moment t ()]) <- execWriterT $
     forQObject_ fixed $ \(Final register _ _) -> do
       (member, connect) <- lift register
-      tell ([member], [connect])
+      tell (maybeToList member, [connect])
   obj <- liftIO $ Qml.newClass members >>= flip Qml.newObject ()
   mapM_ ($ obj) connectors
   return $ QmlObject obj fixed
@@ -141,9 +152,22 @@ qmlObject o = do
 -- {-\# LANGUAGE DeriveGeneric \#-}
 -- import GHC.Generics
 -- ...
--- data Foo p = Foo { bar :: ... } deriving Generic1
+-- data Foo p = Foo { bar :: T, ... } deriving Generic1
 -- instance QObject Foo
 -- @
+--
+-- When there is an error while deriving the class, the error messages will look like
+-- this:
+--
+-- @
+-- Could not deduce (QObjectDerivingError …
+--                        () "Object type tag can only appear in member fields")
+--      arising from a use of ‘Graphics.QML.React.$gdmitraverseQObject’
+-- ...
+-- @
+--
+-- In this case, look for the the @QObjectDerivingError@. It will show you an error
+-- message explaining the problem.
 class QObject o where
   -- | Traverse each member of the object. The traversal function gets access to the
   -- name of the member (in derived instances, this is the record selector name) and
@@ -164,7 +188,7 @@ forQObject_ :: (QObject o, Applicative f) => o p -> (forall k a. Member k a p ->
 forQObject_ o f = void $ itraverseQObject (\_ a -> None <$ f a) o
 --------------------------------------------------------------------------------
 
--- | Class for reporting errors during the generation of a QObject
+-- | Class for reporting errors during the generation of a QObject.
 class QObjectDerivingError t (k :: Symbol) | t -> k where
   -- | Allows to create any type. This means that there can never be an instance for
   -- this class, which is expected.
@@ -218,89 +242,64 @@ instance QObjectDerivingError () "Object type tag can only appear in member fiel
 -- while @f@ is the type of the object itself.
 data DefWith t (f :: * -> *)
 
--- | Type of an object definition for the object type @f@ with the reactive-banana time
--- type @t@.
-type Def t f = f (DefWith t f)
+-- | Type of an object definition for the object type @o@ with the reactive-banana time
+-- type @t@. Each member field of the definition has type @MemberDef t o k a@
+type Def t o = o (DefWith t o)
 
--- | Type for the final object with the reactive-banana time type @t@.
+-- | Definition of a member of the object type @o@ with kind @k@, type @a@ and @t@ as
+-- the reactive-banana time.
+type MemberDef t o k a = Member k a (DefWith t o)
+
+-- | Object type tag for the final object with the reactive-banana time type @t@.
+-- The final object contains the values, behaviors and events for all members.
 data Final t
+
+-- | Object type tag to make an object containing only the latest value of each
+-- member, without the behaviors and events belonging to it.
+data Latest
 
 -- | This is an internal type, used to create a dummy member that contains no data.
 -- One case this is required is the implementation of 'forQObject_'.
 data None
 
--- | Tag for a viewable property member. A viewable property can only be modified from
--- Haskell and not from QML. It can be read from QML.
-data View
-
--- | Tag for a mutable property member. A mutable property can be modified and read
--- from both Haskell and QML.
---
--- Whenever the QML code changes the property, a signal is emitted.
--- The value of the property is still controlled by the Haskell code, so it has the
--- choice to accept the change signal and change the property or leave it as it is.
-data Mut
-
--- | Tag for a static property member. A static property cannot change and stays
--- constant for the whole run of the program.
-data Static
-
--- | Type of the outputs a property produces. These need to be specified by the user.
-type family PropOutputs k t a
-type instance PropOutputs View   t a = Behavior t a
-type instance PropOutputs Mut    t a = Behavior t a
-type instance PropOutputs Static t a = a
-
--- | Type of inputs a property can generate. These are supplied by the library.
-type family PropInputs k t a
-type instance PropInputs View   t a = ()
-type instance PropInputs Mut    t a = Event t a
-type instance PropInputs Static t a = ()
-
--- | Register as a member of an object. First element contains the member, the second
--- tuple element specifies an action to perform after the object has been created.
-type Register t = Moment t (Qml.Member (), Qml.ObjRef () -> Moment t ())
-
--- | Generic definition of a property.
-data PropDef f t k a = PropDef
-  { propOutFun :: f (Final t) -> PropOutputs k t a
-  , propIn  :: PropInputs k t a
-  , propRegister :: String -> PropOutputs k t a -> Register t
-  }
-
 -- | A member of an object type.
 --
--- The first type argument, @k@, specifies the kind of the member, currently one of
--- 'View', 'Mut' or 'Static'.
--- The second argument specifies the type (meaning differs based on the kind of the
--- member, but for properties, this is the type of the contained value).
--- The third type argument is the object type tag, which should be set to the type
--- argument given to the object type.
+-- The type arguments specify the kind of the member (@k@, one of 'Static', 'Var',
+-- 'View', 'Mut' or 'Fun'), the type of the member (@a@, meaning depends on member kind)
+-- and the object type tag @p@ which should be set to the object type tag passed to the
+-- owner of this property.
 data Member k a p where
-  Prop   :: PropDef f t k a -> Member k a (DefWith t f)
-  Final  :: Register t -> PropInputs k t a -> PropOutputs k t a -> Member k a (Final t)
+  Def    :: PropDef f t k a -> Member k a (DefWith t f)
+  Final  :: Register t -> MemberInputs k t a -> MemberOutputs k t a -> Member k a (Final t)
+  Latest :: MemberValue k a -> Member k a Latest
   None   :: Member k a None
 
--- | Create a new static property member. The argument is a function from the final
--- object to the value of the property. This allows the value to depend on other members.
-static :: (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes)
-       => (f (Final t) -> a) -> Member Static a (DefWith t f)
-static f = Prop $ PropDef f () $ \name val ->
-  pure (Qml.defPropertyConst' name (const $ pure val), const $ pure ())
+-- | Type of the outputs a member produces. These need to be specified by the user.
+type family MemberOutputs k t a
 
--- | Event that is emitted whenever the given mutable property is changed from QML.
-changed :: Member Mut a (Final t) -> Event t a
-changed (Final _ e _) = e
+-- | Type of inputs a member can generate. These are supplied by the library.
+type family MemberInputs k t a
+
+-- | Type family for the value of a member. The value is the part of a member
+-- that 
+type family MemberValue k a 
+
+-- | Register as a member of an object. First element contains the member
+-- (may be 'Nothing', which means there is no QML member), the second tuple element
+-- is the action to perform after the object has been created.
+type Register t = Moment t (Maybe (Qml.Member ()), Qml.ObjRef () -> Moment t ())
+
+-- | Generic definition of a property.
+data PropDef o t k a = PropDef
+  { propOutFun :: o (Final t) -> MemberOutputs k t a
+  , propIn  :: MemberInputs k t a
+  , propRegister :: String -> MemberOutputs k t a -> Register t
+  }
 
 -- | Class for members that can produce a behavior.
 class HasBehavior k where
   -- | The behavior containing the current value of the given member.
   behavior :: Member k a (Final t) -> Behavior t a
-
--- | Static members always have the same value, so the behavior is constant
-instance HasBehavior Static where behavior (Final _ _ v) = pure v
-instance HasBehavior View where behavior (Final _ _ b) = b
-instance HasBehavior Mut where behavior (Final _ _ b) = b
 
 -- | Properties that can be constructed from behaviors. The behavior fully specifies
 -- the value of the property at any moment in time.
@@ -308,23 +307,15 @@ instance HasBehavior Mut where behavior (Final _ _ b) = b
 class AsProperty k a where
   -- | Construct a new property from a behavior, which may depend on other properties.
   prop :: Frameworks t
-       => (f (Final t) -> Behavior t a) -> Moment t (Member k a (DefWith t f))
-
-instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes) => AsProperty View a where
-  prop f = pure $ Prop $ PropDef f () $ \name b -> do
-    (sig, ref, connect) <- makeStore b
-    return (Qml.defPropertySigRO' name sig (const $ readIORef ref), connect)
-
-instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes, Qml.CanGetFrom a ~ Qml.Yes) => AsProperty Mut a where
-  prop f = flip fmap newEvent $ \(event, handler) -> Prop $ PropDef f event $ \n b -> do
-    (sig, ref, connect) <- makeStore b
-    pure (Qml.defPropertySigRW' n sig (const $ readIORef ref) (const handler), connect)
+       => (o (Final t) -> Behavior t a) -> Moment t (MemberDef t o k a)
 
 -- | Make an IORef for the given behavior that always contains the current value of the
 -- behavior. Returns a signal that is emited whenever the property is changed.
 --
 -- To emit the signal, a hook is returned that needs to be called once on the constructed
 -- qml object reference to register the signal handler.
+--
+-- This is often used to implement AsProperty instances.
 makeStore :: Frameworks t => Behavior t a
           -> Moment t (Qml.SignalKey (IO ()), IORef a, Qml.ObjRef () -> Moment t ())
 makeStore b = do
@@ -334,3 +325,176 @@ makeStore b = do
         bChanged <- changes b
         reactimate' $ fmap (\v -> writeIORef ref v >> Qml.fireSignal sig obj) <$> bChanged
   return (sig, ref, connect)
+
+--------------------------------------------------------------------------------
+
+-- | Kind of a static property member. A static property cannot change and stays
+-- constant for the whole run of the program.
+data Static
+type instance MemberOutputs Static t a = a
+type instance MemberInputs Static t a = ()
+type instance MemberValue  Static a = a
+
+-- | Static members always have the same value, so the behavior is constant.
+instance HasBehavior Static where behavior (Final _ _ v) = pure v
+
+-- | Create a new static property member. The argument is a function from the final
+-- object to the value of the property. This allows the value to depend on other members.
+static :: (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes)
+       => (o (Final t) -> a) -> Moment t (MemberDef t o Static a)
+static f = pure $ Def $ PropDef f () $ \name val ->
+  pure (Just . Qml.defPropertyConst' name . const $ pure val, const $ pure ())
+
+-- | Kind of a member that exists only on the haskell side and is not exposed to QML.
+-- It can be used for state that the haskell code needs to keep.
+data Var
+type instance MemberOutputs Var t a = Behavior t a
+type instance MemberInputs  Var t a = ()
+type instance MemberValue   Var a = a
+instance HasBehavior Var where behavior (Final _ _ b) = b
+
+instance AsProperty Var a where
+  prop f = pure $ Def $ PropDef f () $ \_ _ -> pure (Nothing, const $ pure ())
+
+-- | Kind of a viewable property member. A viewable property can only be modified from
+-- Haskell and not from QML. It can be read from QML.
+data View
+type instance MemberOutputs View t a = Behavior t a
+type instance MemberInputs View  t a = ()
+type instance MemberValue View a = a
+instance HasBehavior View where behavior (Final _ _ b) = b
+
+-- | For this instance, it must be possible to return the property type to QML. This is
+-- why it requires the property type to have 'Qml.Marshal' instance.
+instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes) => AsProperty View a where
+  prop f = pure $ Def $ PropDef f () $ \name b -> do
+    (sig, ref, connect) <- makeStore b
+    return (Just $ Qml.defPropertySigRO' name sig (const $ readIORef ref), connect)
+
+-- | Kind of a mutable property member. A mutable property can be modified and read
+-- from both Haskell and QML.
+--
+-- Whenever the QML code changes the property, a signal is emitted.
+-- The value of the property is still controlled by the Haskell code, so it has the
+-- choice to accept the change signal and change the property or leave it as it is.
+data Mut
+type instance MemberInputs Mut t a = Event t a
+type instance MemberOutputs Mut t a = Behavior t a
+type instance MemberValue Mut a = a
+instance HasBehavior Mut where behavior (Final _ _ b) = b
+
+-- | Event that is emitted whenever the given mutable property is changed from QML.
+changed :: Member Mut a (Final t) -> Event t a
+changed (Final _ e _) = e
+
+-- | For this instance, it must be possible to return the property to QML and read it get
+-- QML. This is why it requires the property type to have 'Qml.Marshal' instance.
+instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes, Qml.CanGetFrom a ~ Qml.Yes) => AsProperty Mut a where
+  prop f = do
+    (event, handler) <- newEvent
+    pure . Def $ PropDef f event $ \n b -> do
+      (sig, ref, connect) <- makeStore b
+      let member = Qml.defPropertySigRW' n sig (const $ readIORef ref) (const handler)
+      pure (Just member, connect)
+
+-- | Kind of a member method. Members with this kind can be called as functions from QML.
+--
+-- The property type for this kind should equal the function signature of the member.
+-- So a @Member Fun (Int -> Int) p@ specifies a method that takes an Int
+-- and returns an Int. This method cannot do any IO.
+--
+-- To do IO, you need to use @Member Fun (Int -> IO Int)@, which also allows the
+-- method to perform some IO to produce it's result.
+data Fun
+type instance MemberInputs Fun t a = Event t (MethodResult a)
+type instance MemberOutputs Fun t a = Behavior t a
+type instance MemberValue Fun a = MethodResult a
+
+-- | Computes the result type of a function with parameters. If the result type is an IO
+-- action, the type returned by the IO action is returned.
+--
+-- Examples:
+--
+-- @
+-- MethodResult (() -> Int) = Int
+-- MethodResult (IO Int) = Int
+-- MethodResult (a -> b -> c) = c
+-- MethodResult (a -> b -> IO c) = c
+-- MethodResult (a -> IO (b -> c)) = b -> c
+-- @
+type family MethodResult a where
+  MethodResult (a -> b) = MethodResult b
+  MethodResult (IO b) = b
+  MethodResult b = b
+
+-- | Return the result of the last call of this member method.
+result :: Member Fun a (Final t) -> Event t (MethodResult a)
+result (Final _ i _) = i
+
+instance MethodSignature a => AsProperty Fun a where
+  prop f = do
+    (resultEvent, resultHandler) <- newEvent
+    pure . Def $ PropDef f resultEvent $ \name fun -> do
+      (inputsEvent, inputsHandler) <- newEvent
+      resultsVar <- liftIO newEmptyMVar
+      let results = applyToArgs <$> fun <@> inputsEvent
+      reactimate $ (>>= resultHandler) <$> results
+      reactimate $ putMVar resultsVar <$> resultEvent
+      case toMethodSuffix :: ToMethodSuffix a (IO (MethodResult a)) of
+        ToMethodSuffix mk ->
+          let handler x = inputsHandler x >> takeMVar resultsVar
+          in pure (Just $ Qml.defMethod' name (const $ mk handler), const $ pure ())
+
+data ToMethodSuffix def ms
+  = forall ms'. Qml.MethodSuffix ms' => ToMethodSuffix ((MethodArgs def -> ms) -> ms')
+
+-- | Return a type that can hold the arguments for the given function type.
+--
+-- Returns a chain of tuples, ending with either @IO ()@ or @()@, depending on
+-- the return type of the function.
+--
+-- Examples:
+--
+-- @
+-- MethodArgs (IO a) = IO ()
+-- MethodArgs ()     = ()
+-- MethodArgs (a -> IO b) = (a, IO ())
+-- MethodArgs (a -> b -> c -> Int) = (a, (b, (c, ())))
+-- @
+type family MethodArgs a where
+  MethodArgs (a -> b) = (a, MethodArgs b)
+  MethodArgs (IO a)  = IO ()
+  MethodArgs a       = ()
+
+-- | Constraint for valid method signatures.
+--
+-- For valid method signatures, each method argument must be an instance
+-- of 'Qml.Marshal' and gettable from QML. The result type must also be an
+-- instance of 'Qml.Marshal' and be returnable to QML.
+type MethodSignature def = MethodSignatureImpl (MethodArgs def) def
+
+-- | This class is the implementation of the @MethodSignature@ class.
+-- It has an extra type argument for the @MethodArgs@ type to avoid OverlappingInstances.
+class (MethodArgs def ~ x, Qml.Marshal (MethodResult def),
+       Qml.CanReturnTo (MethodResult def) ~ Qml.Yes) => MethodSignatureImpl x def where
+  toMethodSuffix :: Qml.MethodSuffix ms => ToMethodSuffix def ms
+  applyToArgs :: def -> MethodArgs def -> IO (MethodResult def)
+
+instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes)
+ => MethodSignatureImpl (IO ()) (IO a) where
+  toMethodSuffix = ToMethodSuffix ($ return ())
+  applyToArgs = const
+
+instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes, MethodArgs a ~ (),
+          a ~ MethodResult a) => MethodSignatureImpl () a where
+  toMethodSuffix = ToMethodSuffix ($ ())
+  applyToArgs = const . return
+
+instance (Qml.Marshal a, Qml.CanGetFrom a ~ Qml.Yes, MethodSignature b, y ~ MethodArgs b)
+ => MethodSignatureImpl (a,y) (a -> b) where
+  toMethodSuffix = case fixType toMethodSuffix of
+    ToMethodSuffix mk -> ToMethodSuffix $ \f x -> mk (f . (,) x)
+   where
+    fixType :: ToMethodSuffix b ms -> ToMethodSuffix b ms
+    fixType = id
+  applyToArgs f = applyToArgs <$> f . fst <*> snd
