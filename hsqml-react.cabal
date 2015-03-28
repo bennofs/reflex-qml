@@ -32,16 +32,9 @@ library
   build-depends:
       base >= 4.4 && < 5
     , reactive-banana
-    , netwire
     , hsqml
-    , containers
-    , text
     , transformers
-    , these
-    , constraints
-    , void
     , mtl
-    , reflection
   exposed-modules:
     Graphics.QML.React
 
