@@ -243,7 +243,9 @@ instance QObjectDerivingError () "Object type tag can only appear in member fiel
 data DefWith t (f :: * -> *)
 
 -- | Type of an object definition for the object type @o@ with the reactive-banana time
--- type @t@. Each member field of the definition has type @MemberDef t o k a@
+-- type @t@.
+--
+-- Each member field of the definition has type @MemberDef t o k a@.
 type Def t o = o (DefWith t o)
 
 -- | Definition of a member of the object type @o@ with kind @k@, type @a@ and @t@ as
@@ -251,12 +253,9 @@ type Def t o = o (DefWith t o)
 type MemberDef t o k a = Member k a (DefWith t o)
 
 -- | Object type tag for the final object with the reactive-banana time type @t@.
+--
 -- The final object contains the values, behaviors and events for all members.
 data Final t
-
--- | Object type tag to make an object containing only the latest value of each
--- member, without the behaviors and events belonging to it.
-data Latest
 
 -- | This is an internal type, used to create a dummy member that contains no data.
 -- One case this is required is the implementation of 'forQObject_'.
@@ -271,7 +270,6 @@ data None
 data Member k a p where
   Def    :: PropDef f t k a -> Member k a (DefWith t f)
   Final  :: Register t -> MemberInputs k t a -> MemberOutputs k t a -> Member k a (Final t)
-  Latest :: MemberValue k a -> Member k a Latest
   None   :: Member k a None
 
 -- | Type of the outputs a member produces. These need to be specified by the user.
@@ -280,12 +278,10 @@ type family MemberOutputs k t a
 -- | Type of inputs a member can generate. These are supplied by the library.
 type family MemberInputs k t a
 
--- | Type family for the value of a member. The value is the part of a member
--- that 
-type family MemberValue k a 
-
--- | Register as a member of an object. First element contains the member
--- (may be 'Nothing', which means there is no QML member), the second tuple element
+-- | Register as a member of an object.
+--
+-- First element contains the member (may be 'Nothing', which means there is no QML
+-- member for this property definition), the second tuple element
 -- is the action to perform after the object has been created.
 type Register t = Moment t (Maybe (Qml.Member ()), Qml.ObjRef () -> Moment t ())
 
@@ -301,9 +297,10 @@ class HasBehavior k where
   -- | The behavior containing the current value of the given member.
   behavior :: Member k a (Final t) -> Behavior t a
 
--- | Properties that can be constructed from behaviors. The behavior fully specifies
--- the value of the property at any moment in time.
--- Instances include 'Mut' and 'View' properties.
+-- | Properties that can be constructed from behaviors.
+--
+-- The behavior fully specifies the value of the property at any moment in time.
+-- Instances include the 'Mut', 'Fun' and 'View' properties.
 class AsProperty k a where
   -- | Construct a new property from a behavior, which may depend on other properties.
   prop :: Frameworks t
@@ -328,40 +325,45 @@ makeStore b = do
 
 --------------------------------------------------------------------------------
 
--- | Kind of a static property member. A static property cannot change and stays
--- constant for the whole run of the program.
+-- | Kind of a static property member.
+--
+-- A static property cannot change and stays constant for the whole run of the program.
+-- It is readable from QML, but cannot be modified from either QML or Haskell.
 data Static
 type instance MemberOutputs Static t a = a
 type instance MemberInputs Static t a = ()
-type instance MemberValue  Static a = a
 
 -- | Static members always have the same value, so the behavior is constant.
 instance HasBehavior Static where behavior (Final _ _ v) = pure v
 
--- | Create a new static property member. The argument is a function from the final
--- object to the value of the property. This allows the value to depend on other members.
+-- | Create a new static property member.
+--
+-- The argument is a function from the final object to the value of the property.
+-- This allows the value to depend on other members.
 static :: (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes)
        => (o (Final t) -> a) -> Moment t (MemberDef t o Static a)
 static f = pure $ Def $ PropDef f () $ \name val ->
   pure (Just . Qml.defPropertyConst' name . const $ pure val, const $ pure ())
 
 -- | Kind of a member that exists only on the haskell side and is not exposed to QML.
--- It can be used for state that the haskell code needs to keep.
+--
+-- It can be used for state that the haskell code needs to keep that cannot be exposed
+-- to QML because it is not marshallable or because it should remain private.
 data Var
 type instance MemberOutputs Var t a = Behavior t a
 type instance MemberInputs  Var t a = ()
-type instance MemberValue   Var a = a
 instance HasBehavior Var where behavior (Final _ _ b) = b
 
 instance AsProperty Var a where
   prop f = pure $ Def $ PropDef f () $ \_ _ -> pure (Nothing, const $ pure ())
 
--- | Kind of a viewable property member. A viewable property can only be modified from
--- Haskell and not from QML. It can be read from QML.
+-- | Kind of a viewable property member.
+--
+-- A viewable property can only be modified from Haskell and not from QML.
+-- It can be read from QML.
 data View
 type instance MemberOutputs View t a = Behavior t a
 type instance MemberInputs View  t a = ()
-type instance MemberValue View a = a
 instance HasBehavior View where behavior (Final _ _ b) = b
 
 -- | For this instance, it must be possible to return the property type to QML. This is
@@ -374,16 +376,17 @@ instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes) => AsProperty View a where
 -- | Kind of a mutable property member. A mutable property can be modified and read
 -- from both Haskell and QML.
 --
--- Whenever the QML code changes the property, a signal is emitted.
+-- Whenever the QML code changes the property, a signal is fired.
 -- The value of the property is still controlled by the Haskell code, so it has the
 -- choice to accept the change signal and change the property or leave it as it is.
 data Mut
 type instance MemberInputs Mut t a = Event t a
 type instance MemberOutputs Mut t a = Behavior t a
-type instance MemberValue Mut a = a
 instance HasBehavior Mut where behavior (Final _ _ b) = b
 
--- | Event that is emitted whenever the given mutable property is changed from QML.
+-- | Event that is fired whenever the given mutable property is changed from QML.
+--
+-- The value of the event is equal to the value the property was set to from QML.
 changed :: Member Mut a (Final t) -> Event t a
 changed (Final _ e _) = e
 
@@ -408,7 +411,6 @@ instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes, Qml.CanGetFrom a ~ Qml.Yes
 data Fun
 type instance MemberInputs Fun t a = Event t (MethodResult a)
 type instance MemberOutputs Fun t a = Behavior t a
-type instance MemberValue Fun a = MethodResult a
 
 -- | Computes the result type of a function with parameters. If the result type is an IO
 -- action, the type returned by the IO action is returned.
@@ -428,6 +430,8 @@ type family MethodResult a where
   MethodResult b = b
 
 -- | Return the result of the last call of this member method.
+--
+-- The returned event fires whenever the function is called from QML.
 result :: Member Fun a (Final t) -> Event t (MethodResult a)
 result (Final _ i _) = i
 
