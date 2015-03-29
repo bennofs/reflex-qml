@@ -35,7 +35,6 @@ step "Building project" << EOF
 EOF
 
 step "Running tests" << EOF
-  echo "PATH: $PATH"
   cabal-$CABALVER test
 EOF
 
