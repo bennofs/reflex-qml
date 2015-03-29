@@ -19,7 +19,6 @@ install:
 
 script:
  - travis/script.sh
- - hlint src
 
 matrix:
   allow_failures:
