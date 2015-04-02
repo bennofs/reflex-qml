@@ -11,10 +11,10 @@ before_install:
  - travis_retry sudo apt-get update
  - sudo apt-get install qdbus qmlscene qt5-default qt5-qmake qtbase5-dev-tools qtchooser qtdeclarative5-dev xbitmaps libqt5svg5-dev qttools5-dev qtscript5-dev qtdeclarative5-controls-plugin -y
  - sudo apt-get install cabal-install-$CABALVER ghc-$GHCVER hlint happy-1.19.3 alex-3.1.3 c2hs
- -  cabal-$CABALVER update
+ - cabal-$CABALVER update
+ - export PATH=/opt/ghc/$GHCVER/bin:/opt/cabal/$CABALVER/bin:/opt/happy/1.19.3/bin:/opt/alex/3.1.3/bin:~/.cabal/bin:$PATH
  # The cabal packages from hvr's PPA are missing the Cabal library
  - cabal-$CABALVER install Cabal --constraint "Cabal ==$CABALVER.*" -j
- - export PATH=/opt/ghc/$GHCVER/bin:/opt/cabal/$CABALVER/bin:/opt/happy/1.19.3/bin:/opt/alex/3.1.3/bin:~/.cabal/bin:$PATH
 
 install:
  - cabal-$CABALVER install --only-dependencies --enable-tests --enable-benchmarks -j
