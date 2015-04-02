@@ -51,13 +51,13 @@ import Control.Monad.Identity
 import Control.Monad.Writer hiding (Product)
 import Data.IORef
 import Data.Maybe
-import Data.Traversable (Traversable(traverse))
 import GHC.Generics
 import GHC.TypeLits
 import Reactive.Banana hiding (Identity)
 import Reactive.Banana.Frameworks
 import Prelude -- avoid FTP related warnings
 
+import qualified Data.Traversable as T
 import qualified Graphics.QML as Qml
 --------------------------------------------------------------------------------
 
@@ -234,8 +234,8 @@ instance (GQObject a, GQObject b) => GQObject (a :*: b) where
   gitraverseQObject f (a :*: b)
     = (:*:) <$> gitraverseQObject f a <*> gitraverseQObject f b
 
-instance (Traversable f, GQObject o) => GQObject (f :.: o) where
-  gitraverseQObject f (Comp1 c) = Comp1 <$> traverse (gitraverseQObject f) c
+instance (T.Traversable f, GQObject o) => GQObject (f :.: o) where
+  gitraverseQObject f (Comp1 c) = Comp1 <$> T.traverse (gitraverseQObject f) c
 
 
 -- | Returns true if this M1 type represents a field selector that is a Member
@@ -545,3 +545,4 @@ instance (Qml.Marshal a, Qml.CanGetFrom a ~ Qml.Yes, MethodSignature b, y ~ Meth
     fixType :: ToMethodSuffix b ms -> ToMethodSuffix b ms
     fixType = id
   applyToArgs f = applyToArgs <$> f . fst <*> snd
+
