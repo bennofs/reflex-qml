@@ -18,10 +18,20 @@ before_install:
 install:
  - | 
    if [ "$GHCVER" = "7.10.1" ]; then
+     packages=$(mktemp -d)
+     cd $packages
+
      cabal get pqueue; cd pqueue-*
      curl https://github.com/bumptech/haskell-pqueue/pull/2.patch | patch -p1
      cabal install
-     cd ..; rm -rf pqueue-*
+     cd ..;
+
+     cabal get reactive-banana; cd reactive-banana-*
+     curl https://github.com/HeinrichApfelmus/reactive-banana/pull/77.patch | patch -p1
+     cabal install
+     cd ..;
+
+     cd $TRAVIS_BUILD_DIR
      cabal-$CABALVER install --only-dependencies --enable-tests --enable-benchmarks -j --allow-newer
    else
      cabal-$CABALVER install --only-dependencies --enable-tests --enable-benchmarks -j
