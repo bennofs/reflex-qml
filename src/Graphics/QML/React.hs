@@ -56,6 +56,7 @@ import GHC.Generics
 import GHC.TypeLits
 import Reactive.Banana hiding (Identity)
 import Reactive.Banana.Frameworks
+import Prelude -- avoid FTP related warnings
 
 import qualified Graphics.QML as Qml
 --------------------------------------------------------------------------------
@@ -158,7 +159,7 @@ qmlObject o = do
 -- | Fix a object definition, passing the result back in so that members can depend
 -- upon each other.
 fixObject :: QObject o => Def t o -> o (Final t)
-fixObject o = let r = imapQObject (fixMember r) o in r where
+fixObject o = fix $ \r -> imapQObject (fixMember r) o where
   fixMember :: o (Final t) -> String -> Member k a (DefWith t o) -> Member k a (Final t)
   fixMember r name (Def PropDef{..}) = Final (propRegister name outs) propIn outs where
     outs = propOutFun r
@@ -239,8 +240,8 @@ instance (Traversable f, GQObject o) => GQObject (f :.: o) where
 
 -- | Returns true if this M1 type represents a field selector that is a Member
 type family IsMember i f where
-  IsMember S (Rec1 (Member k a)) = True
-  IsMember x y = False
+  IsMember S (Rec1 (Member k a)) = 'True
+  IsMember x y = 'False
 
 -- | Checks that the selector type is not 'NoSelector' (this happens for types without
 -- record selectors).
@@ -255,10 +256,10 @@ class (b ~ IsMember i g) => M1GQObject b i s g where
                       => (forall k a. String -> Member k a p -> f (Member k a q))
                       -> M1 i s g p -> f (M1 i s g q)
 
-instance (ValidSelector s, Selector s) => M1GQObject True S s (Rec1 (Member k a)) where
+instance (ValidSelector s, Selector s) => M1GQObject 'True S s (Rec1 (Member k a)) where
   m1gitraverseQObject f s@(M1 (Rec1 m)) = M1 . Rec1 <$> f (selName s) m
 
-instance (QObject g, IsMember i g ~ False) => M1GQObject False i s g where
+instance (QObject g, IsMember i g ~ 'False) => M1GQObject 'False i s g where
   m1gitraverseQObject f (M1 x) = M1 <$> itraverseQObject f x
 
 instance M1GQObject (IsMember i f) i s f => GQObject (M1 i s f) where
