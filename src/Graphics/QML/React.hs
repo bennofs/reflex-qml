@@ -3,10 +3,8 @@
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
-{-# LANGUAGE FunctionalDependencies #-}
 {-# LANGUAGE GADTs #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
-{-# LANGUAGE OverlappingInstances #-}
 {-# LANGUAGE RankNTypes #-}
 {-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE ScopedTypeVariables #-}
@@ -16,7 +14,8 @@
 -- | Reactive-banana based interface to HsQML
 module Graphics.QML.React
   ( -- * Running
-    runQMLReact 
+    runQMLReactLoop
+  , runQMLReact
 
     -- * Objects
   , QmlObject()
@@ -45,6 +44,7 @@ module Graphics.QML.React
   , Def(), MemberDef(), DefWith(), Final()
   ) where
 
+import GHC.Exts
 import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Monad.Identity
@@ -63,18 +63,29 @@ import qualified Graphics.QML as Qml
 -- | Run a reactive QML application.
 --
 -- This function compiles the supplied reactive-banana network, actuates it and
--- runs the QML engine with the specified engine config.
+-- runs the QML engine with the specified engine config. It also starts the Qt event loop.
 -- This function will not return until the engine has terminated.
 --
 -- warning: the context object configuration option is overriden by this function
-runQMLReact :: Qml.EngineConfig -> (forall t. Frameworks t => Moment t (QmlObject t o)) -> IO ()
+runQMLReactLoop :: Qml.EngineConfig -> (forall t. Frameworks t => Moment t (QmlObject t o)) -> IO ()
+runQMLReactLoop config n = Qml.runEventLoop $ runQMLReact config n
+
+-- | Run a reactive QML application, without starting the event loop.
+--
+-- This function is like 'runQMLReactLoop', but doesn't start the event loop. This is
+-- useful if you want to control the Qt event loop yourself (for example, when running
+-- in GHCi).
+--
+-- This function also blocks until the engine has terminated.
+runQMLReact :: Qml.EngineConfig -> (forall t. Frameworks t => Moment t (QmlObject t o)) -> Qml.RunQML ()
 runQMLReact config networkDefinition = do
-  objVar <- newEmptyMVar
-  network <- compile (networkDefinition >>= liftIO . putMVar objVar . objectRef)
-  obj <- takeMVar objVar
-  actuate network
-  Qml.runEngineLoop config { Qml.contextObject = Just obj }
-  pause network
+  (end, obj) <- liftIO $ do
+    objVar <- newEmptyMVar
+    network <- compile (networkDefinition >>= liftIO . putMVar objVar . objectRef)
+    actuate network
+    (,) (pause network) <$> takeMVar objVar
+  Qml.runEngine config { Qml.contextObject = Just obj }
+  liftIO end
 
 -- | A reference to a QML object. Values of this data type can be constructed with
 -- 'qmlObject'.
@@ -91,7 +102,13 @@ finalObject (QmlObject _ o) = o
 
 -- | Return the reference to the underlying QML object.
 objectRef :: QmlObject t o -> Qml.AnyObjRef
-objectRef (QmlObject r _) = Qml.anyObjRef r
+objectRef = Qml.anyObjRef . rawObjectRef
+
+-- | Return the raw reference to the object, exposing the internal representation.
+--
+-- This function should not be exported.
+rawObjectRef :: QmlObject t o -> Qml.ObjRef ()
+rawObjectRef (QmlObject r _) = r
 
 -- | Construct a new 'QmlObject' from an object definition.
 --
@@ -129,11 +146,7 @@ objectRef (QmlObject r _) = Qml.anyObjRef r
 -- This definition can then be passed to 'qmlObject' to create a new object reference.
 qmlObject :: forall o t. (QObject o, Frameworks t) => Def t o -> Moment t (QmlObject t o)
 qmlObject o = do
-  let fixed = imapQObject fixMember o
-
-      fixMember :: String -> Member k a (DefWith t o) -> Member k a (Final t)
-      fixMember name (Def PropDef{..}) = Final (propRegister name outs) propIn outs
-        where outs = propOutFun fixed
+  let fixed = fixObject o
   (members, connectors :: [Qml.ObjRef () -> Moment t ()]) <- execWriterT $
     forQObject_ fixed $ \(Final register _ _) -> do
       (member, connect) <- lift register
@@ -141,6 +154,14 @@ qmlObject o = do
   obj <- liftIO $ Qml.newClass members >>= flip Qml.newObject ()
   mapM_ ($ obj) connectors
   return $ QmlObject obj fixed
+
+-- | Fix a object definition, passing the result back in so that members can depend
+-- upon each other.
+fixObject :: QObject o => Def t o -> o (Final t)
+fixObject o = let r = imapQObject (fixMember r) o in r where
+  fixMember :: o (Final t) -> String -> Member k a (DefWith t o) -> Member k a (Final t)
+  fixMember r name (Def PropDef{..}) = Final (propRegister name outs) propIn outs where
+    outs = propOutFun r
 
 -- | A class for object types, which provides the required functionality for traversing
 -- the member of the object.
@@ -189,7 +210,9 @@ forQObject_ o f = void $ itraverseQObject (\_ a -> None <$ f a) o
 --------------------------------------------------------------------------------
 
 -- | Class for reporting errors during the generation of a QObject.
-class QObjectDerivingError t (k :: Symbol) | t -> k where
+class (ErrMsg t ~ k) => QObjectDerivingError t (k :: Symbol) where
+  type ErrMsg t :: Symbol
+  
   -- | Allows to create any type. This means that there can never be an instance for
   -- this class, which is expected.
   err :: t -> a
@@ -206,9 +229,6 @@ class GQObject o where
 instance GQObject (K1 i c) where
   gitraverseQObject _ (K1 c) = pure (K1 c)
 
-instance GQObject o => GQObject (M1 i c o) where
-  gitraverseQObject f (M1 o) = M1 <$> gitraverseQObject f o
-
 instance (GQObject a, GQObject b) => GQObject (a :*: b) where
   gitraverseQObject f (a :*: b)
     = (:*:) <$> gitraverseQObject f a <*> gitraverseQObject f b
@@ -216,8 +236,33 @@ instance (GQObject a, GQObject b) => GQObject (a :*: b) where
 instance (Traversable f, GQObject o) => GQObject (f :.: o) where
   gitraverseQObject f (Comp1 c) = Comp1 <$> traverse (gitraverseQObject f) c
 
-instance Selector s => GQObject (M1 S s (Rec1 (Member k a))) where
-  gitraverseQObject f s@(M1 (Rec1 m)) = M1 . Rec1 <$> f (selName s) m
+
+-- | Returns true if this M1 type represents a field selector that is a Member
+type family IsMember i f where
+  IsMember S (Rec1 (Member k a)) = True
+  IsMember x y = False
+
+-- | Checks that the selector type is not 'NoSelector' (this happens for types without
+-- record selectors).
+type family ValidSelector s :: Constraint where
+  ValidSelector NoSelector
+    = QObjectDerivingError () "Object type must have record selectors"
+  ValidSelector a = ()
+
+-- | Type class for dispatch based on IsMember
+class (b ~ IsMember i g) => M1GQObject b i s g where
+  m1gitraverseQObject :: Applicative f
+                      => (forall k a. String -> Member k a p -> f (Member k a q))
+                      -> M1 i s g p -> f (M1 i s g q)
+
+instance (ValidSelector s, Selector s) => M1GQObject True S s (Rec1 (Member k a)) where
+  m1gitraverseQObject f s@(M1 (Rec1 m)) = M1 . Rec1 <$> f (selName s) m
+
+instance (QObject g, IsMember i g ~ False) => M1GQObject False i s g where
+  m1gitraverseQObject f (M1 x) = M1 <$> itraverseQObject f x
+
+instance M1GQObject (IsMember i f) i s f => GQObject (M1 i s f) where
+  gitraverseQObject = m1gitraverseQObject
 
 instance QObjectDerivingError () "Object type must have exactly one constructor"
          => GQObject V1
@@ -227,9 +272,6 @@ instance QObjectDerivingError () "Object type must have at least one field"
 
 instance QObjectDerivingError () "Object type cannot have multiple constructors"
          => GQObject (a :+: b)
-
-instance QObjectDerivingError () "Object type must have record selectors"
-         => GQObject (M1 S NoSelector a)
 
 instance QObjectDerivingError () "Object type tag can only appear in member fields"
          => GQObject (Rec1 f)
