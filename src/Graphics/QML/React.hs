@@ -33,6 +33,7 @@ module Graphics.QML.React
 
     -- * Members
   , Member()
+  , emptyMember
 
   , AsProperty(..)
   , HasBehavior(..)
@@ -51,7 +52,6 @@ module Graphics.QML.React
   ) where
 
 import Data.Char
-import Data.Proxy
 import Data.List (isPrefixOf)
 import Control.Concurrent.STM
 import System.IO.Unsafe
@@ -68,7 +68,6 @@ import Reactive.Banana hiding (Identity)
 import Reactive.Banana.Frameworks
 import Prelude -- avoid FTP related warnings
 
-import qualified Data.Traversable as T
 import qualified Graphics.QML as Qml
 --------------------------------------------------------------------------------
 
@@ -376,8 +375,8 @@ instance (GQObject a, GQObject b) => GQObject (a :*: b) where
   gitraverseQObject f (a :*: b)
     = (:*:) <$> gitraverseQObject (f . proj1) a <*> gitraverseQObject (f . proj2) b
    where
-    proj1 = mapAccessor $ \(a :*: b) -> a
-    proj2 = mapAccessor $ \(a :*: b) -> b
+    proj1 = mapAccessor $ \(x :*: _) -> x
+    proj2 = mapAccessor $ \(_ :*: y) -> y
   gemptyObject = gemptyObject :*: gemptyObject
 
 -- | Returns true if this M1 type represents a field selector that is a Member
@@ -408,7 +407,7 @@ instance (ValidSelector s, Selector s, MemberKind k)
 
 instance (GQObject g, IsMember i g ~ 'False) => M1GQObject 'False i s g where
   m1gitraverseQObject f (M1 x) = M1 <$> gitraverseQObject (f . mapAccessor g) x where
-    g (M1 x) = x
+    g (M1 a) = a
   m1gemptyObject = M1 gemptyObject
 
 instance M1GQObject (IsMember i f) i s f => GQObject (M1 i s f) where
