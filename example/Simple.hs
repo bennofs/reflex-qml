@@ -1,45 +1,76 @@
 {-# LANGUAGE RecordWildCards #-}
-{-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE DeriveGeneric #-}
 module Main where
 
 import Control.Concurrent
+import Control.Exception
 import Control.Monad
+import Control.Monad.IO.Class
 import GHC.Generics
 import Graphics.QML.Engine
 import Graphics.QML.React
-import Reactive.Banana
-import Reactive.Banana.Frameworks
+import Reactive.Banana.Combinators
+
+import qualified Data.Traversable as T
 
 data StateView p = StateView
-  { statx    :: Member Mut Int p
-  , staty    :: Member Mut Int p
-  , computed :: Member View Int p
+  { stateviewValue    :: Member Mut Int p
+  , stateviewComputed :: Member View Int p
   } deriving Generic1
-instance QObject StateView
+instance QObject StateView where
+  itraverseQObject = itraverseQObjectStripPrefix
 
-stateView :: Frameworks t => Int -> Int -> Moment t (Def t StateView)
-stateView x y = StateView
-  <$> prop (stepper x . changed . statx)
-  <*> prop (stepper y . changed . staty)
-  <*> prop (\StateView{..} -> (+) <$> behavior statx <*> behavior staty)
+stateView :: Frameworks t => Int -> Moment t (Object (Behavior t) StateView)
+stateView x = object $ StateView
+  <$> prop (stepper x . changed . stateviewValue)
+  <*> prop (\StateView{..} -> (2 *) <$> behavior stateviewValue)
 
-data App t = App
-  { turn :: Member Mut Int t
-  , states :: Member Var [[(Int, Int)]] t
---  , currentState :: Member View [StateView T] t
-  , test :: Member Fun (Int -> IO Int) t
+data App p = App
+  { page :: Member Mut Int p
+  , states :: Member Var [[Int]] p
+  , currentState :: Member Embed [ValueObject StateView] p
+  , addEntry :: Member Fun (Int -> Int) p
   } deriving Generic1
 instance QObject App
 
 config :: EngineConfig
 config = defaultEngineConfig { initialDocument = fileDocument "/tmp/test.qml" }
 
+startEventLoop :: IO ()
+startEventLoop = void . forkIO $ do
+  catch (runEventLoop . liftIO . forever $ threadDelay maxBound) $ \e ->
+    const (return ()) $ (e :: EventLoopException)
+
+initialStates :: [[Int]]
+initialStates =
+  [ [1,2,3,4,5]
+  , [2,3,4,6,1]
+  , [5,5,21,4]
+  , [1,6,8,9,0,1,4]
+  , [10]
+  ]
+
 main :: IO ()
-main = runQMLReact config $ qmlObject =<< do
-  App
-    <$> prop (\App{..} -> stepper 1 $ result test)
-    <*> prop (\App{..} -> pure [])
-    <*> prop (\App{..} -> fmap fun $ behavior turn)
+main = do
+  startEventLoop
+  void . requireEventLoop $ runQMLReact config $ namespace "app" $ object $ do
+    App
+      <$> prop (\App{..} -> stepper 1 $ max 0 . min 4 <$> changed page)
+      <*> prop db
+      <*> embed (\app@App{..} -> viewState <$> behavior page <*> behavior states)
+      <*> prop (\App{..} -> pure id)
  where
-  fun t t' = t' <$ putStrLn ("test: " ++ show t ++ ":" ++ show t')
+  viewState :: Int -> [[Int]] -> Embedded [ValueObject StateView]
+  viewState t sts
+    = T.sequenceA [embedObject $ stateView x | x <- sts !! t]
+
+  db App{..} = past
+    where update st 0 (_:sts) = map (value . stateviewValue . objectValue) st : sts
+          update st n (s:sts) = s : update st (n - 1) sts
+          update _ _ x = x
+          past = accumB initialStates $ unions
+             [ update <$> behavior currentState <*> behavior page <@ changed page
+             , create <$> behavior page <@> result addEntry
+             ]
+          create 0 entry (x:xs) = (x ++ [entry]) : xs
+          create p entry (x:xs) = x : create (p - 1) entry xs

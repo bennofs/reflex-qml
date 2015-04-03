@@ -35,6 +35,7 @@ library
     , hsqml
     , transformers
     , mtl
+    , stm
   exposed-modules:
     Graphics.QML.React
 

@@ -1,3 +1,4 @@
+{-# LANGUAGE EmptyCase #-}
 {-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
 {-# LANGUAGE DefaultSignatures #-}
@@ -18,32 +19,42 @@ module Graphics.QML.React
   , runQMLReact
 
     -- * Objects
-  , QmlObject()
+  , Object()
+  , objectValue
+  , objectBehavior
   , objectRef
-  , finalObject
-  , qmlObject
+  , object
+  , namespace
+    
   , QObject(..)
-  , imapQObject
-  , forQObject_
+  , itraverseQObjectGeneric
+  , itraverseQObjectStripPrefix
   , QObjectDerivingError
 
     -- * Members
   , Member()
-  , Static()
-  , static
-  , Var()
-  , View()
-  , Mut()
-  , changed
+
   , AsProperty(..)
   , HasBehavior(..)
-  , Fun()
-  , result
-  , MethodResult
-  , MethodSignature
-  , Def(), MemberDef(), DefWith(), Final()
+  , HasValue(..)
+    
+  , Static(), static
+  , Var()
+  , View()
+  , Mut(), changed
+  , Fun(), result, MethodResult, MethodSignature      
+  , Embed(), embed, Embedded(), embedObject, ValueObject
+  , Def(), MemberDef(), DefWith(), Final(), Current()
+
+    -- * Reexports
+  , Frameworks
+  , Moment
   ) where
 
+import Data.Char
+import Data.List (isPrefixOf)
+import Control.Concurrent.STM
+import System.IO.Unsafe
 import GHC.Exts
 import Control.Applicative
 import Control.Concurrent.MVar
@@ -68,7 +79,9 @@ import qualified Graphics.QML as Qml
 -- This function will not return until the engine has terminated.
 --
 -- warning: the context object configuration option is overriden by this function
-runQMLReactLoop :: Qml.EngineConfig -> (forall t. Frameworks t => Moment t (QmlObject t o)) -> IO ()
+runQMLReactLoop :: Qml.EngineConfig
+                -> (forall t. Frameworks t => Moment t (Object (Behavior t) o))
+                -> IO ()
 runQMLReactLoop config n = Qml.runEventLoop $ runQMLReact config n
 
 -- | Run a reactive QML application, without starting the event loop.
@@ -78,7 +91,8 @@ runQMLReactLoop config n = Qml.runEventLoop $ runQMLReact config n
 -- in GHCi).
 --
 -- This function also blocks until the engine has terminated.
-runQMLReact :: Qml.EngineConfig -> (forall t. Frameworks t => Moment t (QmlObject t o)) -> Qml.RunQML ()
+runQMLReact :: Qml.EngineConfig -> (forall t. Frameworks t => Moment t (Object (Behavior t) o))
+            -> Qml.RunQML ()
 runQMLReact config networkDefinition = do
   (end, obj) <- liftIO $ do
     objVar <- newEmptyMVar
@@ -89,27 +103,36 @@ runQMLReact config networkDefinition = do
   liftIO end
 
 -- | A reference to a QML object. Values of this data type can be constructed with
--- 'qmlObject'.
-data QmlObject t o = QmlObject (Qml.ObjRef ()) (o (Final t))
+-- 'object'.
+--
+-- The first type argument used to store the current object value.
+-- For example, an @Object (Behavior t)@ has a value that changes with time while an
+-- @Object Identity@ has a constant value.
+-- To extract the value, you can use 'objectValue'.
+data Object f o = Object (Qml.ObjRef ()) (f (o Current))
 
-instance Qml.Marshal (QmlObject t o) where
-  type MarshalMode (QmlObject t o) c d = Qml.ModeObjTo () c
-  marshaller = Qml.toMarshaller $ \(QmlObject o _) -> o
+instance Qml.Marshal (Object f o) where
+  type MarshalMode (Object f o) c d = Qml.ModeObjTo () c
+  marshaller = Qml.toMarshaller rawObjectRef
 
--- | Return the final object. The final object contains the values, signals and behaviors
--- (depending on the member kind) for all members of the object.
-finalObject :: QmlObject t o -> o (Final t)
-finalObject (QmlObject _ o) = o
+-- | Get the current value of a QML object.
+objectValue :: Object Identity o -> o Current
+objectValue (Object _ o) = runIdentity o
+
+-- | Get the behavior of a changing QML object.
+objectBehavior :: Object f o -> f (o Current)
+objectBehavior (Object _ o) = o
 
 -- | Return the reference to the underlying QML object.
-objectRef :: QmlObject t o -> Qml.AnyObjRef
+objectRef :: Object f o -> Qml.AnyObjRef
 objectRef = Qml.anyObjRef . rawObjectRef
 
 -- | Return the raw reference to the object, exposing the internal representation.
 --
--- This function should not be exported.
-rawObjectRef :: QmlObject t o -> Qml.ObjRef ()
-rawObjectRef (QmlObject r _) = r
+-- This function should not be exported, since the underlying object type can change
+-- in future versions of the library.
+rawObjectRef :: Object f o -> Qml.ObjRef ()
+rawObjectRef (Object r _) = r
 
 -- | Construct a new 'QmlObject' from an object definition.
 --
@@ -144,25 +167,46 @@ rawObjectRef (QmlObject r _) = r
 --
 -- We supply a definition for each member. Note how we get access to a @self@ argument,
 -- so that properties can refer to each other.
--- This definition can then be passed to 'qmlObject' to create a new object reference.
-qmlObject :: forall o t. (QObject o, Frameworks t) => Def t o -> Moment t (QmlObject t o)
-qmlObject o = do
-  let fixed = fixObject o
+-- This definition can then be passed to 'object' to create a new object reference.
+object :: forall o t. (QObject o, Frameworks t)
+          => Moment t (Def t o) -> Moment t (Object (Behavior t) o)
+object o = do
+  fixed <- fixObject <$> o
   (members, connectors :: [Qml.ObjRef () -> Moment t ()]) <- execWriterT $
-    forQObject_ fixed $ \(Final register _ _) -> do
-      (member, connect) <- lift register
+    iforQObject_ fixed $ \name (Final PropDef{..} outs) -> do
+      (member, connect) <- lift $ propRegister name outs
       tell (maybeToList member, [connect])
   obj <- liftIO $ Qml.newClass members >>= flip Qml.newObject ()
   mapM_ ($ obj) connectors
-  return $ QmlObject obj fixed
+  pure . Object obj $ objectB fixed
+ where
+  objectB :: QObject o => o (Final t) -> Behavior t (o Current)
+  objectB = itraverseQObject $ \_ (Final p outs) -> Current <$> propValue p outs  
 
 -- | Fix a object definition, passing the result back in so that members can depend
 -- upon each other.
 fixObject :: QObject o => Def t o -> o (Final t)
-fixObject o = fix $ \r -> imapQObject (fixMember r) o where
-  fixMember :: o (Final t) -> String -> Member k a (DefWith t o) -> Member k a (Final t)
-  fixMember r name (Def PropDef{..}) = Final (propRegister name outs) propIn outs where
-    outs = propOutFun r
+fixObject o = fix $ \r -> mapQObject (fixMember r) o where
+  fixMember :: o (Final t) -> MemberDef t o k a -> Member k a (Final t)
+  fixMember r (Def p) = Final (p { propOutFun = final }) outs
+    where outs = propOutFun p r
+          final f = case f of
+
+-- | Create a new object with only one member containing the given object.
+--
+-- This can be used to create a namespace for global context object.
+--
+-- For example, the following code will make all exposed members accessible under
+-- the name @app.memberName@ instead of just @memberName@:
+--
+-- @
+-- runQMLReactLoop defaultEngineConfig $ namespace "app" $ ...
+-- @
+namespace :: Frameworks t => String -> Moment t (Object f o) -> Moment t (Object f o)
+namespace name mo = do
+  Object ref val <- mo
+  clazz <- liftIO $ Qml.newClass [ Qml.defPropertyConst' name . const $ return ref ]
+  liftIO $ flip Object val <$> Qml.newObject clazz ()
 
 -- | A class for object types, which provides the required functionality for traversing
 -- the member of the object.
@@ -201,13 +245,67 @@ class QObject o where
   itraverseQObject f = fmap to1 . gitraverseQObject f . from1
                           
 
--- | Like 'itraverseQObject', but only map a function without performing effects.
-imapQObject :: QObject o => (forall k a. String -> Member k a p -> Member k a q) -> o p -> o q
-imapQObject f = runIdentity . itraverseQObject (fmap Identity . f)
+-- | Like 'itraverseQObject', but only map a function without performing effects and
+-- no access to the member name.
+mapQObject :: QObject o => (forall k a. Member k a p -> Member k a q) -> o p -> o q
+mapQObject f = runIdentity . itraverseQObject (fmap Identity . const f)
 
 -- | Like 'itraverseQObject', but ignore the return value.
-forQObject_ :: (QObject o, Applicative f) => o p -> (forall k a. Member k a p -> f ()) -> f ()
-forQObject_ o f = void $ itraverseQObject (\_ a -> None <$ f a) o
+iforQObject_ :: (QObject o, Applicative f)
+             => o p -> (forall k a. String -> Member k a p -> f ()) -> f ()
+iforQObject_ o f = void $ itraverseQObject (\i a -> None <$ f i a) o
+
+-- | Implementation for 'itraverseQObject' using GHC generics, with field name transform.
+--
+-- The first argument specifies a function to transform record selector names to
+-- member names. This can be used to strip leading underscores when using lenses for
+-- example.
+--
+-- Example:
+--
+-- @
+-- instance QObject Foo where
+--   itraverseQObject = itraverseQObjectGeneric $ drop (length "foo")
+-- @
+itraverseQObjectGeneric :: (Applicative f, Generic1 o, GQObject (Rep1 o))
+                        => (String -> String)
+                        -> (forall k a. String -> Member k a p -> f (Member k a q))
+                        -> o p -> f (o q)
+itraverseQObjectGeneric trans f = fmap to1 . gitraverseQObject (f . trans) . from1
+
+-- | Generic implementation for 'itraverseQObject' which removes prefixes from
+-- record selector names to get the member name.
+--
+-- The function is case-insensitive, so both @datatypenameField@ and @dataTypeNameField@
+-- will be transformed to @field@. It uses 'toLower' before performing the comparision.
+-- In addition, the first letter of the member name is always convert to lower case.
+--
+-- It also removes leading underscores and underscores directly following the prefix.
+--
+-- Example:
+--
+-- @
+-- data Foo p = Foo { __foo_X :: Member View Int p, _other_Field :: Member View Int p }
+-- instance QObject Foo where
+--   itraverseQObject = itraverseQObjectStripPrefix
+-- @
+--
+-- In the example, Foo will have members named @x@ and @other_Field@.
+itraverseQObjectStripPrefix ::
+  (Applicative f, Generic1 o, GQObject (Rep1 o), Rep1 o ~ M1 D d g, Datatype d) =>
+  (forall k a. String -> Member k a p -> f (Member k a q)) ->
+  o p -> f (o q)
+itraverseQObjectStripPrefix f o
+  = itraverseQObjectGeneric (lowercaseFirst . strip_ . stripPrefix . strip_) f o
+ where
+  strip_ = dropWhile (== '_')
+  stripPrefix p
+    | lowercase dataName `isPrefixOf` lowercase p = drop (length dataName) p
+    | otherwise = p
+  dataName = lowercase $ datatypeName (from1 o)
+  lowercase = map toLower
+  lowercaseFirst (x:xs) = toLower x:xs
+  lowercaseFirst [] = []
 --------------------------------------------------------------------------------
 
 -- | Class for reporting errors during the generation of a QObject.
@@ -259,8 +357,8 @@ class (b ~ IsMember i g) => M1GQObject b i s g where
 instance (ValidSelector s, Selector s) => M1GQObject 'True S s (Rec1 (Member k a)) where
   m1gitraverseQObject f s@(M1 (Rec1 m)) = M1 . Rec1 <$> f (selName s) m
 
-instance (QObject g, IsMember i g ~ 'False) => M1GQObject 'False i s g where
-  m1gitraverseQObject f (M1 x) = M1 <$> itraverseQObject f x
+instance (GQObject g, IsMember i g ~ 'False) => M1GQObject 'False i s g where
+  m1gitraverseQObject f (M1 x) = M1 <$> gitraverseQObject f x
 
 instance M1GQObject (IsMember i f) i s f => GQObject (M1 i s f) where
   gitraverseQObject = m1gitraverseQObject
@@ -300,6 +398,10 @@ type MemberDef t o k a = Member k a (DefWith t o)
 -- The final object contains the values, behaviors and events for all members.
 data Final t
 
+-- | Object type tag for an object that only contains the current values for each
+-- member, without signals or events.
+data Current
+
 -- | This is an internal type, used to create a dummy member that contains no data.
 -- One case this is required is the implementation of 'forQObject_'.
 data None
@@ -311,15 +413,18 @@ data None
 -- and the object type tag @p@ which should be set to the object type tag passed to the
 -- owner of this property.
 data Member k a p where
-  Def    :: PropDef f t k a -> Member k a (DefWith t f)
-  Final  :: Register t -> MemberInputs k t a -> MemberOutputs k t a -> Member k a (Final t)
-  None   :: Member k a None
+  Def     :: PropDef f t k a -> Member k a (DefWith t f)
+  Final   :: PropDef Final t k a -> MemberOutputs k t a -> Member k a (Final t)
+  Current :: MemberValue k a -> Member k a Current
+  None    :: Member k a None
 
 -- | Type of the outputs a member produces. These need to be specified by the user.
 type family MemberOutputs k t a
 
 -- | Type of inputs a member can generate. These are supplied by the library.
 type family MemberInputs k t a
+
+type family MemberValue k a
 
 -- | Register as a member of an object.
 --
@@ -332,6 +437,7 @@ type Register t = Moment t (Maybe (Qml.Member ()), Qml.ObjRef () -> Moment t ())
 data PropDef o t k a = PropDef
   { propOutFun :: o (Final t) -> MemberOutputs k t a
   , propIn  :: MemberInputs k t a
+  , propValue :: MemberOutputs k t a -> Behavior t (MemberValue k a)
   , propRegister :: String -> MemberOutputs k t a -> Register t
   }
 
@@ -339,6 +445,11 @@ data PropDef o t k a = PropDef
 class HasBehavior k where
   -- | The behavior containing the current value of the given member.
   behavior :: Member k a (Final t) -> Behavior t a
+
+class HasValue k where
+  value :: Member k a Current -> a
+  default value :: MemberValue k a ~ a => Member k a Current -> a
+  value (Current a) = a
 
 -- | Properties that can be constructed from behaviors.
 --
@@ -375,9 +486,11 @@ makeStore b = do
 data Static
 type instance MemberOutputs Static t a = a
 type instance MemberInputs Static t a = ()
+type instance MemberValue Static a = a
 
 -- | Static members always have the same value, so the behavior is constant.
-instance HasBehavior Static where behavior (Final _ _ v) = pure v
+instance HasBehavior Static where behavior (Final _ v) = pure v
+instance HasValue Static
 
 -- | Create a new static property member.
 --
@@ -385,7 +498,7 @@ instance HasBehavior Static where behavior (Final _ _ v) = pure v
 -- This allows the value to depend on other members.
 static :: (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes)
        => (o (Final t) -> a) -> Moment t (MemberDef t o Static a)
-static f = pure $ Def $ PropDef f () $ \name val ->
+static f = pure $ Def $ PropDef f () pure $ \name val ->
   pure (Just . Qml.defPropertyConst' name . const $ pure val, const $ pure ())
 
 -- | Kind of a member that exists only on the haskell side and is not exposed to QML.
@@ -395,10 +508,12 @@ static f = pure $ Def $ PropDef f () $ \name val ->
 data Var
 type instance MemberOutputs Var t a = Behavior t a
 type instance MemberInputs  Var t a = ()
-instance HasBehavior Var where behavior (Final _ _ b) = b
+type instance MemberValue Var a = a
+instance HasBehavior Var where behavior (Final _ b) = b
+instance HasValue Var
 
 instance AsProperty Var a where
-  prop f = pure $ Def $ PropDef f () $ \_ _ -> pure (Nothing, const $ pure ())
+  prop f = pure $ Def $ PropDef f () id $ \_ _ -> pure (Nothing, const $ pure ())
 
 -- | Kind of a viewable property member.
 --
@@ -407,12 +522,14 @@ instance AsProperty Var a where
 data View
 type instance MemberOutputs View t a = Behavior t a
 type instance MemberInputs View  t a = ()
-instance HasBehavior View where behavior (Final _ _ b) = b
+type instance MemberValue View a = a
+instance HasBehavior View where behavior (Final _ b) = b
+instance HasValue View
 
 -- | For this instance, it must be possible to return the property type to QML. This is
 -- why it requires the property type to have 'Qml.Marshal' instance.
 instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes) => AsProperty View a where
-  prop f = pure $ Def $ PropDef f () $ \name b -> do
+  prop f = pure $ Def $ PropDef f () id $ \name b -> do
     (sig, ref, connect) <- makeStore b
     return (Just $ Qml.defPropertySigRO' name sig (const $ readIORef ref), connect)
 
@@ -425,20 +542,22 @@ instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes) => AsProperty View a where
 data Mut
 type instance MemberInputs Mut t a = Event t a
 type instance MemberOutputs Mut t a = Behavior t a
-instance HasBehavior Mut where behavior (Final _ _ b) = b
+type instance MemberValue Mut a = a
+instance HasBehavior Mut where behavior (Final _ b) = b
+instance HasValue Mut
 
 -- | Event that is fired whenever the given mutable property is changed from QML.
 --
 -- The value of the event is equal to the value the property was set to from QML.
 changed :: Member Mut a (Final t) -> Event t a
-changed (Final _ e _) = e
+changed (Final p _) = propIn p
 
 -- | For this instance, it must be possible to return the property to QML and read it get
 -- QML. This is why it requires the property type to have 'Qml.Marshal' instance.
 instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes, Qml.CanGetFrom a ~ Qml.Yes) => AsProperty Mut a where
   prop f = do
     (event, handler) <- newEvent
-    pure . Def $ PropDef f event $ \n b -> do
+    pure . Def $ PropDef f event id $ \n b -> do
       (sig, ref, connect) <- makeStore b
       let member = Qml.defPropertySigRW' n sig (const $ readIORef ref) (const handler)
       pure (Just member, connect)
@@ -454,6 +573,7 @@ instance (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes, Qml.CanGetFrom a ~ Qml.Yes
 data Fun
 type instance MemberInputs Fun t a = Event t (MethodResult a)
 type instance MemberOutputs Fun t a = Behavior t a
+type instance MemberValue Fun a = ()
 
 -- | Computes the result type of a function with parameters. If the result type is an IO
 -- action, the type returned by the IO action is returned.
@@ -476,12 +596,12 @@ type family MethodResult a where
 --
 -- The returned event fires whenever the function is called from QML.
 result :: Member Fun a (Final t) -> Event t (MethodResult a)
-result (Final _ i _) = i
+result (Final p _) = propIn p
 
 instance MethodSignature a => AsProperty Fun a where
   prop f = do
     (resultEvent, resultHandler) <- newEvent
-    pure . Def $ PropDef f resultEvent $ \name fun -> do
+    pure . Def $ PropDef f resultEvent (const $ pure ()) $ \name fun -> do
       (inputsEvent, inputsHandler) <- newEvent
       resultsVar <- liftIO newEmptyMVar
       let results = applyToArgs <$> fun <@> inputsEvent
@@ -546,3 +666,73 @@ instance (Qml.Marshal a, Qml.CanGetFrom a ~ Qml.Yes, MethodSignature b, y ~ Meth
     fixType = id
   applyToArgs f = applyToArgs <$> f . fst <*> snd
 
+-- | This member kind allows to embed other objects or lists of other objects as a
+-- member.
+--
+-- This member allows to access the current value of the embedded object, but not
+-- the individual events for the embed object.
+data Embed
+type instance MemberOutputs Embed t a = (Behavior t a, Behavior t (Embedded a))
+type instance MemberInputs Embed t a = ()
+type instance MemberValue Embed a = a
+instance HasBehavior Embed where behavior (Final _ o) = fst o
+instance HasValue Embed
+
+-- | This type is used to construct the value for an Embed member.
+newtype Embedded a = Embedded { runEmbedded :: Frameworks t => Moment t (a, AddHandler a) }
+
+instance Functor Embedded where
+  fmap f (Embedded m) = Embedded $ g <$> m where
+    g (a, handler) = (f a, fmap f handler)
+
+instance Applicative Embedded where
+  pure x = Embedded $ pure (x, AddHandler . const . pure . pure $ ())
+  Embedded f <*> Embedded a = Embedded $ do
+    (fv, fwatch) <- f
+    (av, awatch) <- a
+    (rwatch, rhandler) <- liftIO newAddHandler
+    liftIO $ do
+      fRef <- newTVarIO fv
+      aRef <- newTVarIO av
+      void . register fwatch $ \fv' -> readWrite aRef fRef fv' >>= rhandler . fv'
+      void . register awatch $ \a'-> readWrite fRef aRef a' >>= rhandler . ($ a')
+    pure (fv av, rwatch)
+   where readWrite fromVar toVar v = atomically (readTVar fromVar <* writeTVar toVar v)
+
+-- | Type synonym for an object that only contains values, used when embedding objects.
+type ValueObject = Object Identity
+
+-- | Embed an object.
+embedObject :: (forall t. Frameworks t => Moment t (Object (Behavior t) o))
+            -> Embedded (ValueObject o)
+embedObject mo = Embedded $ do
+  o <- mo
+  let updatedObject = Object (rawObjectRef o) . Identity
+  start <- initial $ objectBehavior o
+  (addHandler, handler) <- liftIO newAddHandler
+  reactimate' . fmap (fmap $ handler . updatedObject) =<< changes (objectBehavior o)
+  return (updatedObject start, addHandler)
+
+-- | Define a new Embed member.
+embed :: (Frameworks t, Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes)
+      => (o (Final t) -> Behavior t (Embedded a)) -> Moment t (MemberDef t o Embed a)
+embed f = do
+  (output, handler) <- newEvent
+  startRef <- liftIO newEmptyMVar
+  start <- liftIO . unsafeInterleaveIO $ readMVar startRef
+  pure . Def . PropDef ((,) (stepper start output) . f) () fst $ \name (_, b) -> do
+    networkRef <- liftIO $ newIORef =<< compile (return ())
+    let update startHandler m = do
+          old <- readIORef networkRef
+          new <- compile $ do
+            (a, watch) <- runEmbedded m
+            void . liftIO $ startHandler a >> register watch handler
+          pause old >> actuate new
+          writeIORef networkRef new
+    liftIO . update (putMVar startRef) =<< initial b
+    valueRef <- liftIO $ newIORef =<< readMVar startRef
+    reactimate $ writeIORef valueRef <$> output
+    sig <- liftIO Qml.newSignalKey
+    let connect obj = reactimate' . fmap (fmap $ updateSig obj) =<< changes b
+        updateSig obj m = update handler m >> Qml.fireSignal sig obj
+    pure (Just (Qml.defPropertySigRO' name sig (const $ readIORef valueRef)), connect)
