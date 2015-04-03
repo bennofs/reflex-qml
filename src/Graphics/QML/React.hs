@@ -27,6 +27,7 @@ module Graphics.QML.React
   , namespace
     
   , QObject(..)
+  , MemberField(..)
   , itraverseQObjectGeneric
   , itraverseQObjectStripPrefix
   , QObjectDerivingError
@@ -34,6 +35,7 @@ module Graphics.QML.React
     -- * Members
   , Member()
   , emptyMember
+  , MemberKind()
 
   , AsProperty(..)
   , HasBehavior(..)
@@ -42,9 +44,9 @@ module Graphics.QML.React
   , Static(), static
   , View()
   , Mut(), changed
-  , Fun(), result, MethodResult, MethodSignature      
+  , Fun(), result, MethodResult, MethodSignature
   , Embed(), embed, Embedded(), embedObject, ValueObject
-  , Def(), MemberDef(), DefWith(), Final(), Current()
+  , Def(), MemberDef(), DefWith(), Final(), Current(), None()
 
     -- * Reexports
   , Frameworks
@@ -295,7 +297,6 @@ iforQObject_ o f = void $ itraverseQObject (\i a -> None <$ f i a) o
 -- @
 -- instance QObject Foo where
 --   itraverseQObject = itraverseQObjectGeneric $ drop (length "foo")
---   emptyObject = emptyObjectGeneric
 -- @
 itraverseQObjectGeneric
   :: (Applicative f, Generic1 o, GQObject (Rep1 o))
@@ -315,8 +316,9 @@ emptyObjectGeneric = to1 gemptyObject
 -- record selector names to get the member name.
 --
 -- The function is case-insensitive, so both @datatypenameField@ and @dataTypeNameField@
--- will be transformed to @field@. It uses 'toLower' before performing the comparision.
--- In addition, the first letter of the member name is always convert to lower case.
+-- will be transformed to @field@. This is implemented using 'toLower' before
+-- performing the comparision.
+-- In addition, the first letter of the member name is always converted to lower case.
 --
 -- It also removes leading underscores and underscores directly following the prefix.
 --
@@ -328,7 +330,7 @@ emptyObjectGeneric = to1 gemptyObject
 --   itraverseQObject = itraverseQObjectStripPrefix
 -- @
 --
--- In the example, Foo will have members named @x@ and @other_Field@.
+-- Here, Foo will have members named @x@ and @other_Field@.
 itraverseQObjectStripPrefix
   :: (Applicative f, Generic1 o, GQObject (Rep1 o), Rep1 o ~ M1 D d g, Datatype d)
   => (forall k a. MemberKind k => MemberField o k a -> Member k a p -> f (Member k a q)) ->
@@ -348,11 +350,13 @@ itraverseQObjectStripPrefix f o
 
 -- | Class for reporting errors during the generation of a QObject.
 class (ErrMsg t ~ k) => QObjectDerivingError t (k :: Symbol) where
+  -- | The error message associated to this type. This is used to avoid ambiguity errors.
   type ErrMsg t :: Symbol
   
   -- | Allows to create any type. This means that there can never be an instance for
   -- this class, which is expected.
   err :: t -> a
+  err = error "QObjectDerivingError: impossible (called err)"
 
 -- | GHC.Generics deriving support
 class GQObject o where
@@ -367,6 +371,7 @@ class GQObject o where
             -> o p -> f (o q)
   gitraverseQObject _ _ = err ()
 
+  -- | Generic emptyObject implementation.
   gemptyObject :: o None
   default gemptyObject :: QObjectDerivingError () x => o None
   gemptyObject = err ()
@@ -461,7 +466,7 @@ data Current
 
 -- | Type tag for an object that doesn't contain any values.
 --
--- This can be used when we are only interested in the structure of the object, not
+-- This can be used when you are only interested in the structure of the object, not
 -- in the actual values. This is for example necessary for implementing 'emptyObject'.
 data None
 
@@ -470,10 +475,11 @@ data Inputs t
 
 -- | A member of an object type.
 --
--- The type arguments specify the kind of the member (@k@, one of 'Static', 'Var',
--- 'View', 'Mut' or 'Fun'), the type of the member (@a@, meaning depends on member kind)
--- and the object type tag @p@ which should be set to the object type tag passed to the
--- owner of this property.
+-- The type arguments are:
+--
+-- * k: kind of the member (one of 'Static', 'View', 'Mut', 'Fun' or 'Embed') which should be an instance of 'MemberKind',
+-- * a: the type of the member, meaning depends on member kind
+-- * p: object type tag which should be set to the object type tag passed to the owner of this member.
 data Member k a p where
   Def     :: PropDef t k a -> Member k a (DefWith t f)
   Final   :: PropDef t k a -> MemberInputs k t a -> Member k a (Final t)
@@ -481,7 +487,8 @@ data Member k a p where
   Current :: MemberValue k a -> Member k a Current
   None    :: Member k a None
 
--- | Construct an empty member. 
+-- | Construct an empty member.
+-- This is mainly used for writing custom 'QObject' instances.
 emptyMember :: Member k a None
 emptyMember = None
 
@@ -504,6 +511,7 @@ class HasBehavior k where
   -- | The behavior containing the current value of the given member.
   behavior :: Member k a (Final t) -> Behavior t a
 
+-- | Class for members that contain a value at any moment in time.
 class HasValue k where
   value :: Member k a Current -> a
   default value :: MemberValue k a ~ a => Member k a Current -> a
@@ -514,7 +522,7 @@ class HasValue k where
 -- The behavior fully specifies the value of the property at any moment in time.
 -- Instances include the 'Mut', 'Fun' and 'View' properties.
 class AsProperty k a where
-  -- | Construct a new property from a behavior, which may depend on other properties.
+  -- | Construct a new property from a behavior.
   prop :: Frameworks t => Behavior t a -> MemberDef t o k a
 
 -- | Make an IORef for the given behavior that always contains the current value of the
@@ -536,7 +544,7 @@ makeStore b = do
 
 --------------------------------------------------------------------------------
 
--- | Class of valid member kinds
+-- | Class of valid member kinds.
 class MemberKind k where
   -- | Type of the outputs a member produces. These need to be specified by the user.
   type MemberOutputs k t a
@@ -549,7 +557,9 @@ class MemberKind k where
 
   -- | Create the inputs for a member of this kind.
   createMemberInputs :: Frameworks t => Moment t (Member k a (Inputs t))
-
+  default createMemberInputs
+            :: (Frameworks t, MemberInputs k t a ~ ()) => Moment t (Member k a (Inputs t))
+  createMemberInputs = pure $ Inputs ()
   
 
 -- | Kind of a static property member.
@@ -562,7 +572,6 @@ instance MemberKind Static where
   type MemberOutputs Static t a = a
   type MemberInputs Static t a = ()
   type MemberValue Static a = a
-  createMemberInputs = return $ Inputs ()
 
 -- | Static members always have the same value, so the behavior is constant.
 instance HasBehavior Static where behavior (Final p _) = pure $ propOut p
@@ -573,8 +582,8 @@ instance HasValue Static
 -- The argument is a function from the final object to the value of the property.
 -- This allows the value to depend on other members.
 static :: (Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes)
-       => a -> Moment t (MemberDef t o Static a)
-static v = pure $ Def $ PropDef v (const $ pure v) $ \name () ->
+       => a -> MemberDef t o Static a
+static v = Def $ PropDef v (const $ pure v) $ \name () ->
   pure (Just . Qml.defPropertyConst' name . const $ pure v, const $ pure ())
 
 -- | Kind of a viewable property member.
@@ -587,7 +596,6 @@ instance MemberKind View where
   type MemberOutputs View t a = Behavior t a
   type MemberInputs View  t a = ()
   type MemberValue View a = a
-  createMemberInputs = return $ Inputs ()
 
 instance HasBehavior View where behavior (Final p _) = propOut p
 instance HasValue View
@@ -739,7 +747,7 @@ instance (Qml.Marshal a, Qml.CanGetFrom a ~ Qml.Yes, MethodSignature b, y ~ Meth
 -- | This member kind allows to embed other objects or lists of other objects as a
 -- member.
 --
--- This member allows to access the current value of the embedded object, but not
+-- It allows to access the current value of the embedded object, but not
 -- the individual events for the embed object.
 data Embed
 instance MemberKind Embed where
