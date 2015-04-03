@@ -679,7 +679,8 @@ instance HasBehavior Embed where behavior (Final _ o) = fst o
 instance HasValue Embed
 
 -- | This type is used to construct the value for an Embed member.
-newtype Embedded a = Embedded { runEmbedded :: Frameworks t => Moment t (a, AddHandler a) }
+newtype Embedded a = Embedded
+  { runEmbedded :: forall t. Frameworks t => Moment t (a, AddHandler a) }
 
 instance Functor Embedded where
   fmap f (Embedded m) = Embedded $ g <$> m where
