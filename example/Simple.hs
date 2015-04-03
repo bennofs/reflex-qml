@@ -21,13 +21,12 @@ instance QObject StateView where
   itraverseQObject = itraverseQObjectStripPrefix
 
 stateView :: Frameworks t => Int -> Moment t (Object (Behavior t) StateView)
-stateView x = object $ StateView
-  <$> prop (stepper x . changed . stateviewValue)
-  <*> prop (\StateView{..} -> (2 *) <$> behavior stateviewValue)
+stateView x = object $ \ ~StateView{..} -> StateView
+  (prop $ stepper x $ changed stateviewValue)
+  (prop $ (2 *) <$> behavior stateviewValue)
 
 data App p = App
   { page :: Member Mut Int p
-  , states :: Member Var [[Int]] p
   , currentState :: Member Embed [ValueObject StateView] p
   , addEntry :: Member Fun (Int -> Int) p
   } deriving Generic1
@@ -53,24 +52,26 @@ initialStates =
 main :: IO ()
 main = do
   startEventLoop
-  void . requireEventLoop $ runQMLReact config $ namespace "app" $ object $ do
-    App
-      <$> prop (\App{..} -> stepper 1 $ max 0 . min 4 <$> changed page)
-      <*> prop db
-      <*> embed (\app@App{..} -> viewState <$> behavior page <*> behavior states)
-      <*> prop (\App{..} -> pure id)
- where
-  viewState :: Int -> [[Int]] -> Embedded [ValueObject StateView]
-  viewState t sts
-    = T.sequenceA [embedObject $ stateView x | x <- sts !! t]
-
-  db App{..} = past
-    where update st 0 (_:sts) = map (value . stateviewValue . objectValue) st : sts
-          update st n (s:sts) = s : update st (n - 1) sts
-          update _ _ x = x
-          past = accumB initialStates $ unions
+  void $ requireEventLoop $ runQMLReact config $ namespace "app" $ object $ \a@App{..} ->
+    let
+      db = accumB initialStates $ unions
              [ update <$> behavior currentState <*> behavior page <@ changed page
              , create <$> behavior page <@> result addEntry
              ]
-          create 0 entry (x:xs) = (x ++ [entry]) : xs
-          create p entry (x:xs) = x : create (p - 1) entry xs
+      
+      update st 0 (_:sts) = map (value . stateviewValue . objectValue) st : sts
+      update st n (s:sts) = s : update st (n - 1) sts
+      update _ _ x = x
+     
+      create 0 entry (x:xs) = (x ++ [entry]) : xs
+      create p entry (x:xs) = x : create (p - 1) entry xs
+
+      viewState :: Int -> [[Int]] -> Embedded [ValueObject StateView]
+      viewState t sts
+        = T.sequenceA [embedObject $ stateView x | x <- sts !! t]
+
+    in App
+      { page = prop $ stepper 1 $ max 0 . min 4 <$> changed page
+      , currentState = embed $ viewState <$> behavior page <*> db
+      , addEntry = prop $ pure id
+      }
