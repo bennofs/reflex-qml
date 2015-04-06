@@ -1,6 +1,5 @@
-{-# LANGUAGE EmptyCase #-}
-{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DataKinds #-}
+{-# LANGUAGE ConstraintKinds #-}
 {-# LANGUAGE DefaultSignatures #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE FlexibleInstances #-}
@@ -61,7 +60,8 @@ import GHC.Exts
 import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Monad.Identity
-import Control.Monad.Writer hiding (Product)
+import Control.Monad.Trans.Class
+import Control.Monad.Trans.Writer hiding (Product)
 import Data.IORef
 import Data.Maybe
 import GHC.Generics
@@ -169,21 +169,22 @@ rawObjectRef (Object r _) = r
 -- We supply a definition for each member. Note how we get access to a @self@ argument,
 -- so that properties can refer to each other.
 -- This definition can then be passed to 'object' to create a new object reference.
-object :: forall o t. (QObject o, Frameworks t)
-          => (o (Final t) -> Def t o) -> Moment t (Object (Behavior t) o)
+object :: (QObject o, Frameworks t)
+       => (o (Final t) -> Def t o) -> Moment t (Object (Behavior t) o)
 object o = do
   fixed <- fixObject o
-  (members, connectors :: [Qml.ObjRef () -> Moment t ()]) <- execWriterT $
+  (members, connectors) <- execWriterT $
     iforQObject_ fixed $ \field (Final PropDef{..} ins) -> do
       (member, connect) <- lift $ propRegister (fieldName field) ins
       tell (maybeToList member, [connect])
   obj <- liftIO $ Qml.newClass members >>= flip Qml.newObject ()
-  mapM_ ($ obj) connectors
+  mapM_ (united . ($ obj)) connectors
   pure . Object obj $ objectB fixed
  where
   objectB :: QObject o => o (Final t) -> Behavior t (o Current)
   objectB = itraverseQObject $ \_ (Final p ins) ->
     Current <$> propValue p ins
+  united = fmap (\() -> ()) -- to help type inference
 
 -- | Fix a object definition, passing the result back in so that members can depend
 -- upon each other.
@@ -553,7 +554,7 @@ class MemberKind k where
   type MemberInputs k t a
 
   -- | Type of the value the member holds at any moment in time.
-  type family MemberValue k a
+  type MemberValue k a
 
   -- | Create the inputs for a member of this kind.
   createMemberInputs :: Frameworks t => Moment t (Member k a (Inputs t))
@@ -801,20 +802,20 @@ embedObject mo = Embedded $ do
 
 -- | Define a new Embed member.
 embed :: (Frameworks t, Qml.Marshal a, Qml.CanReturnTo a ~ Qml.Yes)
-      => (Behavior t (Embedded a)) -> MemberDef t o Embed a
+      => Behavior t (Embedded a) -> MemberDef t o Embed a
 embed b = Def . PropDef () fst $ \name (_, (startRef, output, handler)) -> do
-    networkRef <- liftIO $ newIORef =<< compile (return ())
-    let update startHandler m = do
-          old <- readIORef networkRef
-          new <- compile $ do
-            (a, watch) <- runEmbedded m
-            void . liftIO $ startHandler a >> register watch handler
-          pause old >> actuate new
-          writeIORef networkRef new
-    liftIO . update (putMVar startRef) =<< initial b
-    valueRef <- liftIO $ newIORef =<< readMVar startRef
-    reactimate $ writeIORef valueRef <$> output
-    sig <- liftIO Qml.newSignalKey
-    let connect obj = reactimate' . fmap (fmap $ updateSig obj) =<< changes b
-        updateSig obj m = update handler m >> Qml.fireSignal sig obj
-    pure (Just (Qml.defPropertySigRO' name sig (const $ readIORef valueRef)), connect)
+  networkRef <- liftIO $ newIORef =<< compile (return ())
+  let update startHandler m = do
+        old <- readIORef networkRef
+        new <- compile $ do
+          (a, watch) <- runEmbedded m
+          void . liftIO $ startHandler a >> register watch handler
+        pause old >> actuate new
+        writeIORef networkRef new
+  liftIO . update (putMVar startRef) =<< initial b
+  valueRef <- liftIO $ newIORef =<< readMVar startRef
+  reactimate $ writeIORef valueRef <$> output
+  sig <- liftIO Qml.newSignalKey
+  let connect obj = reactimate' . fmap (fmap $ updateSig obj) =<< changes b
+      updateSig obj m = update handler m >> Qml.fireSignal sig obj
+  pure (Just (Qml.defPropertySigRO' name sig (const $ readIORef valueRef)), connect)
