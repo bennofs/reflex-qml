@@ -169,22 +169,21 @@ rawObjectRef (Object r _) = r
 -- We supply a definition for each member. Note how we get access to a @self@ argument,
 -- so that properties can refer to each other.
 -- This definition can then be passed to 'object' to create a new object reference.
-object :: (QObject o, Frameworks t)
+object :: forall o t. (QObject o, Frameworks t)
        => (o (Final t) -> Def t o) -> Moment t (Object (Behavior t) o)
 object o = do
   fixed <- fixObject o
-  (members, connectors) <- execWriterT $
+  (members, connectors :: [Qml.ObjRef () -> Moment t ()]) <- execWriterT $
     iforQObject_ fixed $ \field (Final PropDef{..} ins) -> do
       (member, connect) <- lift $ propRegister (fieldName field) ins
       tell (maybeToList member, [connect])
   obj <- liftIO $ Qml.newClass members >>= flip Qml.newObject ()
-  mapM_ (united . ($ obj)) connectors
+  mapM_ ($ obj) connectors
   pure . Object obj $ objectB fixed
  where
   objectB :: QObject o => o (Final t) -> Behavior t (o Current)
   objectB = itraverseQObject $ \_ (Final p ins) ->
     Current <$> propValue p ins
-  united = fmap (\() -> ()) -- to help type inference
 
 -- | Fix a object definition, passing the result back in so that members can depend
 -- upon each other.
