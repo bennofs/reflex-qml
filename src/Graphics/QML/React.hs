@@ -61,7 +61,7 @@ import Control.Applicative
 import Control.Concurrent.MVar
 import Control.Monad.Identity
 import Control.Monad.Trans.Class
-import Control.Monad.Trans.Writer hiding (Product)
+import Control.Monad.Trans.Writer
 import Data.IORef
 import Data.Maybe
 import GHC.Generics
