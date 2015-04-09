@@ -24,11 +24,6 @@ install:
      cabal install
      cd ..;
 
-     cabal get reactive-banana; cd reactive-banana-*
-     curl -L https://github.com/HeinrichApfelmus/reactive-banana/pull/77.patch | patch -p2
-     cabal install
-     cd ..;
-
      cd $TRAVIS_BUILD_DIR
      cabal install --only-dependencies --enable-tests --enable-benchmarks -j --allow-newer
    else
