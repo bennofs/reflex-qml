@@ -36,8 +36,10 @@ library
     , transformers
     , mtl
     , stm
+    , containers
   exposed-modules:
     Graphics.QML.React
+    Reactive.Banana.Stepper
 
 test-suite doctests
   type:    exitcode-stdio-1.0
