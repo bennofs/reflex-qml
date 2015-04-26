@@ -1,4 +1,4 @@
-name:          hsqml-react
+name:          reflex-qml
 version:       0.1
 license:       BSD3
 license-file:  LICENSE
@@ -6,12 +6,11 @@ cabal-version: >= 1.10
 author:        Benno Fünfstück
 maintainer:    Benno Fünfstück <benno.fuenfstueck@gmail.com>
 stability:     experimental
-homepage:      http://github.com/bennofs/hsqml-react
-bug-reports:   http://github.com/bennofs/hsqml-react/issues
+homepage:      http://github.com/bennofs/reflex-qml/
+bug-reports:   http://github.com/bennofs/reflex-qml/issues
 copyright:     Copyright (C) 2014 Benno Fünfstück
-synopsis:      Reactive banana interface for HsQML, a declarative UI framework from Qt
-description:
-  Provides a reactive-banana based interface to HsQML. Supports both read-only and mutable properties.
+synopsis:      reflex-qml
+description:   reflex-qml
 build-type:    Custom
 
 extra-source-files:
@@ -23,7 +22,7 @@ extra-source-files:
 
 source-repository head
   type: git
-  location: https://github.com/bennofs/hsqml-react.git
+  location: https://github.com/bennofs/reflex-qml.git
 
 library
   hs-source-dirs: src
@@ -31,15 +30,6 @@ library
   ghc-options: -Wall -fwarn-tabs
   build-depends:
       base >= 4.4 && < 5
-    , reactive-banana
-    , hsqml
-    , transformers
-    , mtl
-    , stm
-    , containers
-  exposed-modules:
-    Graphics.QML.React
-    Reactive.Banana.Stepper
 
 test-suite doctests
   type:    exitcode-stdio-1.0

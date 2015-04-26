@@ -22,7 +22,7 @@ function step_suppress {
 
 step "Configuring project" << 'EOF'
   tmp=$(mktemp)
-  cabal configure --enable-tests --enable-benchmarks -v2 --ghc-options="-Wall -Werror" &> $tmp || (
+  cabal-$CABALVER configure --enable-tests --enable-benchmarks -v2 --ghc-options="-Wall -Werror" &> $tmp || (
     cat $tmp
     exit 1
   )
@@ -31,24 +31,24 @@ step "Configuring project" << 'EOF'
 EOF
 
 step "Building project" << EOF
-  cabal build
+  cabal-$CABALVER build
 EOF
 
 step "Running tests" << EOF
-  cabal test
+  cabal-$CABALVER test
 EOF
 
 step "Creating source distribution" << EOF
-  cabal check
-  cabal sdist # tests that a source-distribution can be generated
+  cabal-$CABALVER check
+  cabal-$CABALVER sdist # tests that a source-distribution can be generated
 EOF
 
 step_suppress "Checking source distribution" << 'EOF'
   # The following scriptlet checks that the resulting source distribution can be built & installed
-  SRC_TGZ=$(cabal info . | awk '{print $2 ".tar.gz";exit}')
+  SRC_TGZ=$(cabal-$CABALVER info . | awk '{print $2 ".tar.gz";exit}')
   cd dist/
   if [ -f "$SRC_TGZ" ]; then
-    cabal install --enable-tests --enable-benchmarks "$SRC_TGZ"
+    cabal-$CABALVER install --enable-tests --enable-benchmarks "$SRC_TGZ"
   else
     echo "expected '$SRC_TGZ' not found"
     exit 1
