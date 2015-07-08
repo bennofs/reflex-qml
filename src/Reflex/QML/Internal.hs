@@ -1,7 +1,13 @@
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE UndecidableInstances #-}
+{-# LANGUAGE FlexibleContexts #-}
+{-# LANGUAGE StandaloneDeriving #-}
+{-# LANGUAGE FunctionalDependencies #-}
+{-# LANGUAGE RecordWildCards #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE ScopedTypeVariables #-}
 module Reflex.QML.Internal where
 
 import Control.Applicative
@@ -9,6 +15,7 @@ import Control.Concurrent.Async
 import Control.Concurrent.Chan
 import Control.Concurrent.MVar
 import Control.Monad.Reader
+import Control.Monad.Trans.Maybe
 import Control.Monad.Writer
 import Data.Dependent.Sum
 import Data.IORef
@@ -20,108 +27,77 @@ import Reflex.Dynamic
 import Reflex.Host.Class
 import Reflex.Spider
 
+import qualified Data.DList as DL
 import qualified Data.Foldable as F
 import qualified Data.Traversable as T
 
-data ObjectSpec m t = ObjectSpec
-  { members :: [Member ()]
-  , outputAction :: ObjRef () -> [Event t (m ())]
-  }
-instance Applicative m => Monoid (ObjectSpec m t) where
-  mempty = ObjectSpec mempty mempty
-  mappend (ObjectSpec a b) (ObjectSpec a' b') = ObjectSpec (a <> a') (b <> b')
-
-data Env t = Env
-  { inputAction :: Chan (DSum (EventTrigger t))
+data AppEnv t = AppEnv
+  { envEventChan :: Chan [DSum (EventTrigger t)]
   }
 
-newtype QApp t m a = QApp
-  { unApp :: ReaderT (Env t) (WriterT (ObjectSpec m t) m) a
-  } deriving (Functor, Applicative, Monad, MonadIO, MonadFix)
+data AppInfo t = AppInfo
+  { eventsToPerform :: DL.DList (Event t (HostFrame t (DL.DList (DSum (EventTrigger t)))))
+  , eventsToQuit :: DL.DList (Event t ())
+  }
+instance Monoid (AppInfo t) where
+  mempty = AppInfo mempty mempty
+  mappend (AppInfo a b) (AppInfo a' b') = AppInfo (mappend a a') (mappend b b')
 
-instance MonadTrans (QApp t) where
-  lift = QApp . lift . lift
+newtype App t a = App
+  { unAppT :: ReaderT (AppEnv t) (WriterT (AppInfo t) (HostFrame t)) a
+  }
+deriving instance ReflexHost t => Functor (App t)
+deriving instance ReflexHost t => Applicative (App t)
+deriving instance ReflexHost t => Monad (App t)
+deriving instance ReflexHost t => MonadHold t (App t)
+deriving instance ReflexHost t => MonadSample t (App t)
+deriving instance ReflexHost t => MonadReflexCreateTrigger t (App t)
+deriving instance (MonadIO (HostFrame t), ReflexHost t) => MonadIO (App t)
 
-instance MonadSample t m => MonadSample t (QApp t m) where
-  sample = lift . sample
+runAppT :: forall t m. (ReflexHost t, MonadIO m, MonadReflexHost t m) => App t () -> m ()
+runAppT (App app) = do
+  eventChannel <- liftIO newChan
+  AppInfo{..} <- runHostFrame . execWriterT . runReaderT app $ AppEnv eventChannel
+  nextActionEvent <- subscribeEvent $ mergeWith (liftA2 (<>)) $ DL.toList eventsToPerform
+  quitEvent <- subscribeEvent $ mergeWith mappend $ DL.toList eventsToQuit
 
-instance MonadHold t m => MonadHold t (QApp t m) where
-  hold v = lift . hold v
+  let
+    go [] = return ()
+    go triggers = do
+      (nextAction, continue) <- lift $ fireEventsAndRead triggers $
+        (,) <$> eventValue nextActionEvent <*> fmap isNothing (readEvent quitEvent)
+      guard continue
+      maybe (return mempty) (lift . runHostFrame) nextAction >>= go . DL.toList
 
-newEventWithFire :: (MonadReflexCreateTrigger t m, MonadIO m)
-                 => QApp t m (Event t a, a -> IO Bool)
+    eventValue :: forall t m a. MonadReadEvent t m => EventHandle t a -> m (Maybe a)
+    eventValue = readEvent >=> T.sequenceA
+
+  void . runMaybeT . forever $ do
+    nextInput <- liftIO $ readChan eventChannel
+    go nextInput
+  return ()
+
+class (ReflexHost t, MonadSample t m, MonadHold t m, MonadReflexCreateTrigger t m, MonadIO m, MonadIO (HostFrame t))
+ => MonadApp t m | m -> t where
+  triggerEvents :: [DSum (EventTrigger t)] -> m ()
+  performEvent_ :: Event t (HostFrame t [DSum (EventTrigger t)]) -> m ()
+  quitOn :: Event t () -> m ()
+
+instance (Reflex t, ReflexHost t, MonadIO (HostFrame t)) => MonadApp t (App t) where
+  triggerEvents triggers = App $ ask >>= \(AppEnv chan) -> liftIO $ writeChan chan triggers
+  performEvent_ event = App $ tell $ mempty
+    { eventsToPerform = pure $ fmap (fmap DL.fromList) event
+    }
+  quitOn event = App $ tell $ mempty { eventsToQuit = pure event }
+
+newEventWithFire :: MonadApp t m => m (Event t a, a -> IO [DSum (EventTrigger t)])
 newEventWithFire = do
-  triggerRef <- liftIO $ newIORef Nothing
-  event <- lift . newEventWithTrigger $ \t ->
-    writeIORef triggerRef Nothing <$ writeIORef triggerRef (Just t)
-  Env chan <- QApp ask
-  let fire v = do
-        trigger <- readIORef triggerRef
-        case trigger of
-          Nothing -> pure False
-          Just x -> True <$ writeChan chan (x :=> v)
-  pure (event, fire)
+  ref <- liftIO $ newIORef Nothing
+  event <- newEventWithTrigger (\h -> writeIORef ref Nothing <$ writeIORef ref (Just h))
+  return (event, \a -> F.toList . fmap (:=> a) <$> readIORef ref)
 
-performEvent :: (Reflex t, MonadIO m, MonadReflexCreateTrigger t m)
-             => Event t (m a) -> QApp t m (Event t a)
+performEvent :: MonadApp t m => Event t (HostFrame t a) -> m (Event t a)
 performEvent event = do
-  triggerRef <- liftIO $ newIORef Nothing
-  result <- lift $ newEventWithTrigger $ \t -> do
-    writeIORef triggerRef (Just t)
-    pure $ writeIORef triggerRef Nothing
-  Env chan <- QApp ask
-  let fireResult v = liftIO $ do
-        maybeTrigger <- readIORef triggerRef
-        F.for_ maybeTrigger $ \t -> writeChan chan (t :=> v)
-  QApp $ tell . ObjectSpec [] $ const [ffor event (>>= fireResult)]
-  pure result
-
-performDynamic :: (Reflex t, MonadIO m, MonadReflexCreateTrigger t m, MonadSample t m,
-                  MonadHold t m)
-               => Dynamic t (m a) -> QApp t m (Dynamic t a)
-performDynamic dyn = do
-  i <- lift . join . sample $ current dyn
-  e <- performEvent $ updated dyn
-  lift $ holdDyn i e
-
-subApp :: (MonadIO m, Reflex t, MonadReflexCreateTrigger t m, MonadHold t m
-            ,MonadSample t m)
-          => Dynamic t (QApp t m a) -> QApp t m (Dynamic t AnyObjRef, Dynamic t a)
-subApp appD = do
-  env <- QApp ask
-  let make (QApp app) = do
-        (a, ObjectSpec ms outputs) <- runWriterT (runReaderT app env)
-        obj <- liftIO $ newClass ms >>= flip newObject ()
-        pure (anyObjRef obj, (mergeWith (>>) $ outputs obj, a))
-  dyn <- performDynamic =<< mapDyn make appD
-  (objDyn, (outputsDyn, aDyn)) <- T.traverse splitDyn =<< splitDyn dyn
-  QApp $ tell . ObjectSpec [] $ const [switchPromptlyDyn outputsDyn]
-  pure (objDyn, aDyn)
-
-runApp :: EngineConfig -> QApp Spider (HostFrame Spider) () -> RunQML ()
-runApp config (QApp app) = do
-  -- This variable will hold the context object as soon as the reflex thread
-  -- has initialized itself
-  objVar <- liftIO newEmptyMVar
-
-  -- The reflex thread. Since running the QML engine blocks the main thread
-  -- (we can't run use runEngineAsync because then we don't know when to stop),
-  -- a thread is used to process the reflex events.
-  let reflexThread = runSpiderHost $ do
-        chan <- liftIO newChan
-        ObjectSpec ms outputs <- runHostFrame $ execWriterT (runReaderT app (Env chan))
-        obj <- liftIO $ newClass ms >>= flip newObject ()
-        liftIO $ putMVar objVar obj
-        allOutputs <- subscribeEvent $ mergeWith (>>) $ outputs obj
-        forever $ do
-          nextInputEvent <- liftIO $ readChan chan
-          join $ fireEventsAndRead [nextInputEvent] $ maybe (pure ()) runHostFrame <$>
-            (readEvent allOutputs >>= T.sequenceA)
-
-  -- Now start the reflex thread and run the QML engine in the main thread after the
-  -- reflex thread has initialized itself far enough to produce the context object.
-  liftIO . withAsync reflexThread $ \_ -> do
-    obj <- takeMVar objVar
-    requireEventLoop $ runEngine config
-      { contextObject = Just $ anyObjRef obj
-      }
+  (result, fire) <- newEventWithFire
+  performEvent_ $ (liftIO . fire =<<) <$> event
+  return result

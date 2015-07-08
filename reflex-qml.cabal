@@ -35,6 +35,7 @@ library
     , lens
     , mtl
     , async
+    , dlist
 
 test-suite doctests
   type:    exitcode-stdio-1.0
