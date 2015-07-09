@@ -56,13 +56,18 @@ deriving instance ReflexHost t => MonadReflexCreateTrigger t (AppHost t)
 deriving instance (MonadIO (HostFrame t), ReflexHost t) => MonadIO (AppHost t)
 deriving instance ReflexHost t => MonadFix (AppHost t)
 
-runAppHostFrame :: ReflexHost t => AppEnv t -> AppHost t () -> HostFrame t (AppInfo t)
-runAppHostFrame env = getApp <=< execWriterT . flip runReaderT env . unAppHost
+execAppHostFrame :: ReflexHost t => AppEnv t -> AppHost t a -> HostFrame t (AppInfo t)
+execAppHostFrame env = fmap fst . runAppHostFrame env
+
+runAppHostFrame :: ReflexHost t => AppEnv t -> AppHost t a -> HostFrame t (AppInfo t, a)
+runAppHostFrame env app = do
+  (a, minfo) <- runWriterT . flip runReaderT env . unAppHost $ app
+  (, a) <$> getApp minfo
 
 hostApp :: (ReflexHost t, MonadIO m, MonadReflexHost t m) => AppHost t () -> m ()
 hostApp app = do
   env <- AppEnv <$> liftIO newChan
-  AppInfo{..} <- runHostFrame $ runAppHostFrame env app
+  AppInfo{..} <- runHostFrame $ execAppHostFrame env app
   nextActionEvent <- subscribeEvent $ mergeWith (liftA2 (<>)) $ DL.toList eventsToPerform
   quitEvent <- subscribeEvent $ mergeWith mappend $ DL.toList eventsToQuit
 
@@ -89,24 +94,28 @@ class (ReflexHost t, MonadSample t m, MonadHold t m, MonadReflexCreateTrigger t 
   getAsyncFire :: m ([DSum (EventTrigger t)] -> IO ())
   performPostBuild_
     :: HostFrame t (DL.DList (Event t (AppPerformAction t)), DL.DList (Event t ())) -> m ()
-  performAppHost_ :: Dynamic t (m ()) -> m ()
+  performAppHost :: Dynamic t (m a) -> m (Event t a)
 
 instance (ReflexHost t, MonadIO (HostFrame t)) => MonadAppHost t (AppHost t) where
   getAsyncFire = AppHost $ fmap liftIO . writeChan . envEventChan <$> ask
 
   performPostBuild_ mevent = AppHost . tell . Ap $ uncurry AppInfo <$> mevent
 
-  performAppHost_ appDyn = do
+  performAppHost appDyn = do
     env <- AppHost ask
-    updatedEvents <- performEvent $ fmap getEvents . runAppHostFrame env <$> updated appDyn
+    (updatedEvents, revent) <- fmap splitE . performEvent $
+      fmap (overFst getEvents) . runAppHostFrame env <$> updated appDyn
     performPostBuild_ $ do
-      initialEvents <- fmap getEvents . runAppHostFrame env =<< sample (current appDyn)
+      initialEvents <- fmap getEvents . execAppHostFrame env =<< sample (current appDyn)
       let (initialToPerform, initialToQuit) = initialEvents
           (updatedToPerform, updatedToQuit) = splitE updatedEvents
       toPerform <- switch <$> hold initialToPerform updatedToPerform
       toQuit    <- switch <$> hold initialToQuit updatedToQuit
       pure (pure toPerform, pure toQuit)
+    return revent
    where
+    overFst f (a,b) = (f a, b)
+
     getEvents :: AppInfo t -> (Event t (AppPerformAction t), Event t ())
     getEvents AppInfo{..} =
       ( mergeWith (liftA2 (<>)) $ DL.toList eventsToPerform
@@ -152,4 +161,4 @@ test = runSpiderHost $ hostApp $ do
   appDyn <- holdDyn (performEvent_ $ liftIO . print <$> updated time) $ ffor at3 $ \_ -> do
     performPostBuild_ $ mempty <$ liftIO (putStrLn "Built!")
     performEvent_ $ liftIO . putStrLn . ("switched: " ++) . show <$> updated time
-  performAppHost_ appDyn
+  void $ performAppHost appDyn
