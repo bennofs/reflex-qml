@@ -1,4 +1,5 @@
 {-# LANGUAGE FlexibleInstances #-}
+{-# LANGUAGE TupleSections #-}
 {-# LANGUAGE UndecidableInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE StandaloneDeriving #-}
@@ -11,6 +12,7 @@
 module Reflex.QML.Internal where
 
 import Control.Applicative
+import Control.Concurrent
 import Control.Concurrent.Async
 import Control.Concurrent.Chan
 import Control.Concurrent.MVar
@@ -85,29 +87,26 @@ hostApp app = do
 
 class (ReflexHost t, MonadSample t m, MonadHold t m, MonadReflexCreateTrigger t m,
        MonadIO m, MonadIO (HostFrame t)) => MonadAppHost t m | m -> t where
-  triggerEvents :: [DSum (EventTrigger t)] -> m ()
-  performEvent_ :: HostFrame t (Event t (AppPerformAction t)) -> m ()
-  performAppHost_ :: Dynamic t (m ()) -> m ()
-  quitOn :: HostFrame t (Event t ()) -> m ()
+  getTriggerEvent :: m ([DSum (EventTrigger t)] -> IO ())
+  performPostBuild_
+    :: HostFrame t (DL.DList (Event t (AppPerformAction t)), DL.DList (Event t ())) -> m ()
+  performAppHostM_ :: Dynamic t (m ()) -> m ()
 
 instance (ReflexHost t, MonadIO (HostFrame t)) => MonadAppHost t (AppHost t) where
-  triggerEvents triggers = AppHost $
-    ask >>= \(AppEnv chan) -> liftIO $ writeChan chan triggers
+  getTriggerEvent = AppHost $ fmap liftIO . writeChan . envEventChan <$> ask
 
-  performEvent_ mevent = AppHost . tell . Ap $ do
-    event <- mevent
-    pure $ mempty { eventsToPerform = pure event }
+  performPostBuild_ mevent = AppHost . tell . Ap $ uncurry AppInfo <$> mevent
 
-  performAppHost_ appDyn = do
+  performAppHostM_ appDyn = do
     env <- AppHost ask
     updatedEvents <- performEvent $ fmap getEvents . runAppHostFrame env <$> updated appDyn
-    AppHost . tell . Ap $ do
+    performPostBuild_ $ do
       initialEvents <- fmap getEvents . runAppHostFrame env =<< sample (current appDyn)
       let (initialToPerform, initialToQuit) = initialEvents
           (updatedToPerform, updatedToQuit) = splitE updatedEvents
       toPerform <- switch <$> hold initialToPerform updatedToPerform
       toQuit    <- switch <$> hold initialToQuit updatedToQuit
-      pure $ AppInfo (pure toPerform) (pure toQuit)
+      pure (pure toPerform, pure toQuit)
    where
     getEvents :: AppInfo t -> (Event t (AppPerformAction t), Event t ())
     getEvents AppInfo{..} =
@@ -115,18 +114,33 @@ instance (ReflexHost t, MonadIO (HostFrame t)) => MonadAppHost t (AppHost t) whe
       , leftmost $ DL.toList eventsToQuit
       )
 
-  quitOn mevent = AppHost . tell . Ap $ do
-    event <- mevent
-    pure $ mempty { eventsToQuit = pure event }
-
-newEventWithFire :: MonadAppHost t m => m (Event t a, a -> IO (DL.DList (DSum (EventTrigger t))))
-newEventWithFire = do
+newEventWithFire :: (MonadIO n, MonadAppHost t m)
+                => (DL.DList (DSum (EventTrigger t)) -> n b)
+                -> m (Event t a, a -> n b)
+newEventWithFire trigger = do
   ref <- liftIO $ newIORef Nothing
   event <- newEventWithTrigger (\h -> writeIORef ref Nothing <$ writeIORef ref (Just h))
-  return (event, \a -> F.foldMap pure . fmap (:=> a) <$> readIORef ref)
+  return (event, \a -> trigger . F.foldMap (pure . (:=> a)) =<< liftIO (readIORef ref))
+
+performEventAndTrigger_ :: MonadAppHost t m => Event t (AppPerformAction t) -> m ()
+performEventAndTrigger_ event = performPostBuild_ $ pure (pure event, mempty)
+
+performEvent_ :: MonadAppHost t m => Event t (HostFrame t ()) -> m ()
+performEvent_ event = performEventAndTrigger_ $ fmap (mempty <$) event
 
 performEvent :: MonadAppHost t m => Event t (HostFrame t a) -> m (Event t a)
 performEvent event = do
-  (result, fire) <- newEventWithFire
-  performEvent_ . pure $ (liftIO . fire =<<) <$> event
+  (result, fire) <- newEventWithFire return
+  performEventAndTrigger_ $ (fire =<<) <$> event
   return result
+
+test :: IO ()
+test = runSpiderHost $ hostApp $ do
+  triggerEvent <- getTriggerEvent
+  (timer, fire) <- newEventWithFire $ triggerEvent . DL.toList
+
+  liftIO $ forkIO $ forever $ do
+    threadDelay 1000000
+    putStrLn "[ext] timer!"
+    fire ()
+  performEvent_ $ liftIO . print <$> timer
