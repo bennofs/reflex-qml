@@ -20,6 +20,7 @@ import Control.Monad.Writer
 import Data.Dependent.Sum
 import Data.IORef
 import Data.Maybe
+import Data.Semigroup.Applicative
 import Graphics.QML
 import Prelude
 import Reflex.Class hiding (constant)
@@ -35,29 +36,34 @@ data AppEnv t = AppEnv
   { envEventChan :: Chan [DSum (EventTrigger t)]
   }
 
+type AppPerformAction t = HostFrame t (DL.DList (DSum (EventTrigger t)))
 data AppInfo t = AppInfo
-  { eventsToPerform :: DL.DList (Event t (HostFrame t (DL.DList (DSum (EventTrigger t)))))
+  { eventsToPerform :: DL.DList (Event t (AppPerformAction t))
   , eventsToQuit :: DL.DList (Event t ())
   }
 instance Monoid (AppInfo t) where
   mempty = AppInfo mempty mempty
   mappend (AppInfo a b) (AppInfo a' b') = AppInfo (mappend a a') (mappend b b')
 
-newtype App t a = App
-  { unAppT :: ReaderT (AppEnv t) (WriterT (AppInfo t) (HostFrame t)) a
+newtype AppHost t a = AppHost
+  { unAppHost :: ReaderT (AppEnv t) (WriterT (Ap (HostFrame t) (AppInfo t)) (HostFrame t)) a
   }
-deriving instance ReflexHost t => Functor (App t)
-deriving instance ReflexHost t => Applicative (App t)
-deriving instance ReflexHost t => Monad (App t)
-deriving instance ReflexHost t => MonadHold t (App t)
-deriving instance ReflexHost t => MonadSample t (App t)
-deriving instance ReflexHost t => MonadReflexCreateTrigger t (App t)
-deriving instance (MonadIO (HostFrame t), ReflexHost t) => MonadIO (App t)
+deriving instance ReflexHost t => Functor (AppHost t)
+deriving instance ReflexHost t => Applicative (AppHost t)
+deriving instance ReflexHost t => Monad (AppHost t)
+deriving instance ReflexHost t => MonadHold t (AppHost t)
+deriving instance ReflexHost t => MonadSample t (AppHost t)
+deriving instance ReflexHost t => MonadReflexCreateTrigger t (AppHost t)
+deriving instance (MonadIO (HostFrame t), ReflexHost t) => MonadIO (AppHost t)
+deriving instance ReflexHost t => MonadFix (AppHost t)
 
-runAppT :: forall t m. (ReflexHost t, MonadIO m, MonadReflexHost t m) => App t () -> m ()
-runAppT (App app) = do
-  eventChannel <- liftIO newChan
-  AppInfo{..} <- runHostFrame . execWriterT . runReaderT app $ AppEnv eventChannel
+runAppHostFrame :: ReflexHost t => AppEnv t -> AppHost t () -> HostFrame t (AppInfo t)
+runAppHostFrame env = getApp <=< execWriterT . flip runReaderT env . unAppHost
+
+hostApp :: forall t m. (ReflexHost t, MonadIO m, MonadReflexHost t m) => AppHost t () -> m ()
+hostApp app = do
+  env <- AppEnv <$> liftIO newChan
+  AppInfo{..} <- runHostFrame $ runAppHostFrame env app
   nextActionEvent <- subscribeEvent $ mergeWith (liftA2 (<>)) $ DL.toList eventsToPerform
   quitEvent <- subscribeEvent $ mergeWith mappend $ DL.toList eventsToQuit
 
@@ -73,31 +79,54 @@ runAppT (App app) = do
     eventValue = readEvent >=> T.sequenceA
 
   void . runMaybeT . forever $ do
-    nextInput <- liftIO $ readChan eventChannel
+    nextInput <- liftIO . readChan $ envEventChan env
     go nextInput
   return ()
 
-class (ReflexHost t, MonadSample t m, MonadHold t m, MonadReflexCreateTrigger t m, MonadIO m, MonadIO (HostFrame t))
- => MonadApp t m | m -> t where
+class (ReflexHost t, MonadSample t m, MonadHold t m, MonadReflexCreateTrigger t m,
+       MonadIO m, MonadIO (HostFrame t)) => MonadAppHost t m | m -> t where
   triggerEvents :: [DSum (EventTrigger t)] -> m ()
-  performEvent_ :: Event t (HostFrame t [DSum (EventTrigger t)]) -> m ()
-  quitOn :: Event t () -> m ()
+  performEvent_ :: HostFrame t (Event t (AppPerformAction t)) -> m ()
+  performAppHost_ :: Dynamic t (m ()) -> m ()
+  quitOn :: HostFrame t (Event t ()) -> m ()
 
-instance (Reflex t, ReflexHost t, MonadIO (HostFrame t)) => MonadApp t (App t) where
-  triggerEvents triggers = App $ ask >>= \(AppEnv chan) -> liftIO $ writeChan chan triggers
-  performEvent_ event = App $ tell $ mempty
-    { eventsToPerform = pure $ fmap (fmap DL.fromList) event
-    }
-  quitOn event = App $ tell $ mempty { eventsToQuit = pure event }
+instance (ReflexHost t, MonadIO (HostFrame t)) => MonadAppHost t (AppHost t) where
+  triggerEvents triggers = AppHost $
+    ask >>= \(AppEnv chan) -> liftIO $ writeChan chan triggers
 
-newEventWithFire :: MonadApp t m => m (Event t a, a -> IO [DSum (EventTrigger t)])
+  performEvent_ mevent = AppHost . tell . Ap $ do
+    event <- mevent
+    pure $ mempty { eventsToPerform = pure event }
+
+  performAppHost_ appDyn = do
+    env <- AppHost ask
+    updatedEvents <- performEvent $ fmap getEvents . runAppHostFrame env <$> updated appDyn
+    AppHost . tell . Ap $ do
+      initialEvents <- fmap getEvents . runAppHostFrame env =<< sample (current appDyn)
+      let (initialToPerform, initialToQuit) = initialEvents
+          (updatedToPerform, updatedToQuit) = splitE updatedEvents
+      toPerform <- switch <$> hold initialToPerform updatedToPerform
+      toQuit    <- switch <$> hold initialToQuit updatedToQuit
+      pure $ AppInfo (pure toPerform) (pure toQuit)
+   where
+    getEvents :: AppInfo t -> (Event t (AppPerformAction t), Event t ())
+    getEvents AppInfo{..} =
+      ( mergeWith (liftA2 (<>)) $ DL.toList eventsToPerform
+      , leftmost $ DL.toList eventsToQuit
+      )
+
+  quitOn mevent = AppHost . tell . Ap $ do
+    event <- mevent
+    pure $ mempty { eventsToQuit = pure event }
+
+newEventWithFire :: MonadAppHost t m => m (Event t a, a -> IO (DL.DList (DSum (EventTrigger t))))
 newEventWithFire = do
   ref <- liftIO $ newIORef Nothing
   event <- newEventWithTrigger (\h -> writeIORef ref Nothing <$ writeIORef ref (Just h))
-  return (event, \a -> F.toList . fmap (:=> a) <$> readIORef ref)
+  return (event, \a -> F.foldMap pure . fmap (:=> a) <$> readIORef ref)
 
-performEvent :: MonadApp t m => Event t (HostFrame t a) -> m (Event t a)
+performEvent :: MonadAppHost t m => Event t (HostFrame t a) -> m (Event t a)
 performEvent event = do
   (result, fire) <- newEventWithFire
-  performEvent_ $ (liftIO . fire =<<) <$> event
+  performEvent_ . pure $ (liftIO . fire =<<) <$> event
   return result

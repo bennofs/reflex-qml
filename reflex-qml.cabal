@@ -36,6 +36,7 @@ library
     , mtl
     , async
     , dlist
+    , reducers    
 
 test-suite doctests
   type:    exitcode-stdio-1.0
