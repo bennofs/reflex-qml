@@ -90,14 +90,14 @@ class (ReflexHost t, MonadSample t m, MonadHold t m, MonadReflexCreateTrigger t 
   getTriggerEvent :: m ([DSum (EventTrigger t)] -> IO ())
   performPostBuild_
     :: HostFrame t (DL.DList (Event t (AppPerformAction t)), DL.DList (Event t ())) -> m ()
-  performAppHostM_ :: Dynamic t (m ()) -> m ()
+  performAppHost_ :: Dynamic t (m ()) -> m ()
 
 instance (ReflexHost t, MonadIO (HostFrame t)) => MonadAppHost t (AppHost t) where
   getTriggerEvent = AppHost $ fmap liftIO . writeChan . envEventChan <$> ask
 
   performPostBuild_ mevent = AppHost . tell . Ap $ uncurry AppInfo <$> mevent
 
-  performAppHostM_ appDyn = do
+  performAppHost_ appDyn = do
     env <- AppHost ask
     updatedEvents <- performEvent $ fmap getEvents . runAppHostFrame env <$> updated appDyn
     performPostBuild_ $ do
@@ -143,4 +143,9 @@ test = runSpiderHost $ hostApp $ do
     threadDelay 1000000
     putStrLn "[ext] timer!"
     fire ()
-  performEvent_ $ liftIO . print <$> timer
+  time <- count timer
+  let at3 = ffilter (== 3) $ updated time
+  appDyn <- holdDyn (performEvent_ $ liftIO . print <$> updated time) $ ffor at3 $ \_ -> do
+    performPostBuild_ $ mempty <$ liftIO (putStrLn "Built!")
+    performEvent_ $ liftIO . putStrLn . ("switched: " ++) . show <$> updated time
+  performAppHost_ appDyn
