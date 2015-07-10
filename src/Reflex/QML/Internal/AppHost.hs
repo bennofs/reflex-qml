@@ -31,14 +31,50 @@ import qualified Data.Foldable as F
 import qualified Data.Traversable as T
 
 --------------------------------------------------------------------------------
+
+-- | This is the environment in which the app host monad runs.
 data AppEnv t = AppEnv
-  { envEventChan :: Chan [DSum (EventTrigger t)]
+  { -- | This is the channel to which external events should push their triggers.
+    --
+    -- Because this is a channel, there is no guarrante that the event that was pushed
+    -- is fired directly in the next frame, as there can already be other events waiting
+    -- which will be fired first.
+    envEventChan :: Chan [DSum (EventTrigger t)]
   }
 
+-- | An action that is run after a frame. It may return event triggers to fire events.
+--
 type AppPerformAction t = HostFrame t (DL.DList (DSum (EventTrigger t)))
+
+-- | Information required to set up the application.
 data AppInfo t = AppInfo
-  { eventsToPerform :: DL.DList (Event t (AppPerformAction t))
+  { -- | Events that are performed after each frame.
+    --
+    -- Each event in this list will be checked after a frame. If it is firing with some
+    -- 'AppPerformAction', then this action will be executed.
+    --
+    -- The event triggers returned by each 'AppPerformAction' are collected in a list.
+    -- If the list is non-empty, then a new frame will be created where all the collected
+    -- triggers are fired at the same time. This process continues until no triggers are
+    -- produced.
+    --
+    -- The returned triggers are fired immediately, even if the 'envEventChan' currently
+    -- contains other triggers waiting to be fired. The events in the 'envEventChan' are
+    -- only processed after all triggers have been fired and no new triggers were
+    -- produced.
+    --
+    -- A common place where you need this is when you want to fire some event in response
+    -- to another event, but you need to perform a monadic action to compute the value of
+    -- the response. Using this field, you can perform the monadic action and then return
+    -- a trigger to fire the event. This guarrantes that the event is fired immediately
+    -- after the frame has finished, even if other, external events are waiting.
+    eventsToPerform :: DL.DList (Event t (AppPerformAction t))
+
+    -- | Events that, when fired, quit the application.
   , eventsToQuit :: DL.DList (Event t ())
+
+    -- | Delayed triggers that will be fired immediately after the initial application
+    -- setup has completed.
   , triggersToFire :: DL.DList (DSum (EventTrigger t))
   }
 
@@ -47,12 +83,16 @@ instance Monoid (AppInfo t) where
   mappend (AppInfo a b c) (AppInfo a' b' c') =
     AppInfo (mappend a a') (mappend b b') (mappend c c')
 
+-- | Produce an 'AppInfo' which only contains 'eventsToPerform'. This is useful in a
+-- monoid chain, like @infoToPerform toPerform <> infoToQuit toQuit@.
 infoPerform :: DL.DList (Event t (AppPerformAction t)) -> AppInfo t
 infoPerform x = mempty { eventsToPerform = x }
 
+-- | Produce an 'AppInfo' which only contains 'eventsToQuit'.
 infoQuit :: DL.DList (Event t ()) -> AppInfo t
 infoQuit x = mempty { eventsToQuit = x }
 
+-- | Produce an 'AppInfo' which only contains 'triggersToFire'.
 infoToFire :: DL.DList (DSum (EventTrigger t)) -> AppInfo t
 infoToFire x = mempty { triggersToFire = x }
 
@@ -107,7 +147,7 @@ class (ReflexHost t, MonadSample t m, MonadHold t m, MonadReflexCreateTrigger t 
       => MonadAppHost t m | m -> t where
   getAsyncFire :: m ([DSum (EventTrigger t)] -> IO ())
   performPostBuild_ :: HostFrame t (AppInfo t) -> m ()
-  performAppHost :: Dynamic t (m a) -> m (Event t a)
+  dynAppHost :: Dynamic t (m a) -> m (Event t a)
   collectPostActions :: m a -> m (m (), a)
 
 instance (ReflexHost t, MonadIO (HostFrame t)) => MonadAppHost t (AppHost t) where
@@ -115,35 +155,42 @@ instance (ReflexHost t, MonadIO (HostFrame t)) => MonadAppHost t (AppHost t) whe
 
   performPostBuild_ mevent = AppHost . tell $ Ap mevent
 
-  performAppHost appDyn = do
+  dynAppHost appDyn = do
     env <- AppHost ask
     (updatedInfo, revent) <- fmap splitE . performEvent $
       runAppHostFrame env <$> updated appDyn
     performPostBuild_ $ do
       initialInfo <- execAppHostFrame env =<< sample (current appDyn)
-      let updatedEvents = fmap getEvents updatedInfo
-          (initialToPerform, initialToQuit) = getEvents initialInfo
-          (updatedToPerform, updatedToQuit) = splitE updatedEvents
-      toPerform <- switch <$> hold initialToPerform updatedToPerform
-      toQuit    <- switch <$> hold initialToQuit updatedToQuit
-      pure $ AppInfo
-        { eventsToPerform = pure toPerform <> pure (pure . triggersToFire <$> updatedInfo)
-        , eventsToQuit = pure toQuit
-        , triggersToFire = triggersToFire initialInfo
-        }
+      switchAppInfo initialInfo updatedInfo
     return revent
-   where
-    getEvents :: AppInfo t -> (Event t (AppPerformAction t), Event t ())
-    getEvents AppInfo{..} =
-      ( mergeWith (liftA2 (<>)) $ DL.toList eventsToPerform
-      , leftmost $ DL.toList eventsToQuit
-      )
 
   collectPostActions (AppHost app) = do
     env <- AppHost ask
     (r, minfo) <- AppHost . lift . lift . runWriterT $ runReaderT app env
     return (AppHost $ tell minfo, r)
 
+appInfoEvents :: (Reflex t, Applicative (HostFrame t))
+              => AppInfo t -> (Event t (AppPerformAction t), Event t ())
+appInfoEvents AppInfo{..} =
+  ( mergeWith (liftA2 (<>)) $ DL.toList eventsToPerform
+  , leftmost $ DL.toList eventsToQuit
+  )
+
+switchAppInfo :: (ReflexHost t, MonadHold t m, Reflex t)
+              => AppInfo t -> Event t (AppInfo t) -> m (AppInfo t)
+switchAppInfo initialInfo updatedInfo = do
+  toPerform <- switch <$> hold initialToPerform updatedToPerform
+  toQuit    <- switch <$> hold initialToQuit updatedToQuit
+  pure $ AppInfo
+    { eventsToPerform = pure toPerform <> pure (pure . triggersToFire <$> updatedInfo)
+    , eventsToQuit = pure toQuit
+    , triggersToFire = triggersToFire initialInfo
+    }
+ where
+  (updatedToPerform, updatedToQuit) = splitE $ fmap appInfoEvents updatedInfo
+  (initialToPerform, initialToQuit) = appInfoEvents initialInfo
+
+--------------------------------------------------------------------------------
 newEventWithFire :: (MonadIO n, MonadAppHost t m)
                 => (DL.DList (DSum (EventTrigger t)) -> n b)
                 -> m (Event t a, a -> n b)
@@ -172,7 +219,7 @@ performEvent event = do
 holdAppHost :: MonadAppHost t m => m a -> Event t (m a) -> m (Dynamic t a)
 holdAppHost mInit mChanged = do
   (applyPostActions, aInit) <- collectPostActions mInit
-  aChanged <- performAppHost =<< holdDyn (aInit <$ applyPostActions) mChanged
+  aChanged <- dynAppHost =<< holdDyn (aInit <$ applyPostActions) mChanged
   holdDyn aInit aChanged
 
 test :: IO ()
