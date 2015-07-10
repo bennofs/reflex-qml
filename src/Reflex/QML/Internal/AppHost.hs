@@ -24,7 +24,6 @@ import Prelude
 import Reflex.Class hiding (constant)
 import Reflex.Dynamic
 import Reflex.Host.Class
-import Reflex.Spider
 
 import qualified Data.DList as DL
 import qualified Data.Foldable as F
@@ -73,28 +72,30 @@ data AppInfo t = AppInfo
     -- | Events that, when fired, quit the application.
   , eventsToQuit :: DL.DList (Event t ())
 
-    -- | Delayed triggers that will be fired immediately after the initial application
-    -- setup has completed.
-  , triggersToFire :: DL.DList (DSum (EventTrigger t))
+    -- | Delayed event triggers that will be fired immediately after the initial
+    -- application setup has completed, before any external events are processed.
+  , triggersToFire :: Ap (HostFrame t) (DL.DList (DSum (EventTrigger t)))
   }
 
-instance Monoid (AppInfo t) where
+instance Applicative (HostFrame t) => Monoid (AppInfo t) where
   mempty = AppInfo mempty mempty mempty
   mappend (AppInfo a b c) (AppInfo a' b' c') =
     AppInfo (mappend a a') (mappend b b') (mappend c c')
 
 -- | Produce an 'AppInfo' which only contains 'eventsToPerform'. This is useful in a
 -- monoid chain, like @infoToPerform toPerform <> infoToQuit toQuit@.
-infoPerform :: DL.DList (Event t (AppPerformAction t)) -> AppInfo t
+infoPerform :: Applicative (HostFrame t)
+            => DL.DList (Event t (AppPerformAction t)) -> AppInfo t
 infoPerform x = mempty { eventsToPerform = x }
 
 -- | Produce an 'AppInfo' which only contains 'eventsToQuit'.
-infoQuit :: DL.DList (Event t ()) -> AppInfo t
+infoQuit :: Applicative (HostFrame t) => DL.DList (Event t ()) -> AppInfo t
 infoQuit x = mempty { eventsToQuit = x }
 
 -- | Produce an 'AppInfo' which only contains 'triggersToFire'.
-infoToFire :: DL.DList (DSum (EventTrigger t)) -> AppInfo t
-infoToFire x = mempty { triggersToFire = x }
+infoToFire :: Applicative (HostFrame t)
+           => HostFrame t (DL.DList (DSum (EventTrigger t))) -> AppInfo t
+infoToFire x = mempty { triggersToFire = Ap x }
 
 newtype AppHost t a = AppHost
   { unAppHost :: ReaderT (AppEnv t) (WriterT (Ap (HostFrame t) (AppInfo t)) (HostFrame t)) a
@@ -135,7 +136,7 @@ hostApp app = do
     eventValue = readEvent >=> T.sequenceA
 
   void . runMaybeT $ do
-    go $ DL.toList triggersToFire
+    go =<< lift (runHostFrame (DL.toList <$> getApp triggersToFire))
     forever $ do
       nextInput <- liftIO . readChan $ envEventChan env
       go nextInput
@@ -182,7 +183,7 @@ switchAppInfo initialInfo updatedInfo = do
   toPerform <- switch <$> hold initialToPerform updatedToPerform
   toQuit    <- switch <$> hold initialToQuit updatedToQuit
   pure $ AppInfo
-    { eventsToPerform = pure toPerform <> pure (pure . triggersToFire <$> updatedInfo)
+    { eventsToPerform = pure toPerform <> pure (getApp . triggersToFire <$> updatedInfo)
     , eventsToQuit = pure toQuit
     , triggersToFire = triggersToFire initialInfo
     }
@@ -205,7 +206,8 @@ newExternalEvent = do
   newEventWithFire $ \triggers -> let l = DL.toList triggers in null l <$ asyncFire l
 
 performEventAndTrigger_ :: MonadAppHost t m => Event t (AppPerformAction t) -> m ()
-performEventAndTrigger_ event = performPostBuild_ $ pure mempty { eventsToPerform = pure event }
+performEventAndTrigger_ event = performPostBuild_ $ pure mempty
+  { eventsToPerform = pure event }
 
 performEvent_ :: MonadAppHost t m => Event t (HostFrame t ()) -> m ()
 performEvent_ event = performEventAndTrigger_ $ fmap (mempty <$) event
@@ -221,6 +223,3 @@ holdAppHost mInit mChanged = do
   (applyPostActions, aInit) <- collectPostActions mInit
   aChanged <- dynAppHost =<< holdDyn (aInit <$ applyPostActions) mChanged
   holdDyn aInit aChanged
-
-test :: IO ()
-test = runSpiderHost $ hostApp $ liftIO (putStrLn "before") >> performPostBuild_ (liftIO $ mempty <$ putStrLn "postBuild!") >> liftIO (putStrLn "after")
