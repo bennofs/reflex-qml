@@ -43,6 +43,7 @@ Window {
             }
             onAccepted: {
                 app.newItem(text);
+                console.log("new item");
                 text = "";
             }
         }

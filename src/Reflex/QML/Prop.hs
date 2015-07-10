@@ -14,7 +14,9 @@ module Reflex.QML.Prop
   , readonly
   , mutable
   , mutableHold
+  , namespace
   , method
+  , methodVoid
   ) where
 
 import Control.Monad.Writer
@@ -63,23 +65,32 @@ mutableHold name initial = mdo
   changed <- mutable name valD
   pure valD
 
+namespace :: MonadIO m => String -> ObjectT m a -> ObjectT m a
+namespace name obj = do
+  (ref, a) <- lift $ runObjectT obj
+  constant name ref
+  return a
+
 data AnyMethodSuffix a = forall ms. MethodSuffix ms => AnyMethodSuffix (IO a -> ms)
 
 class MethodSignature a where
-  type MethodResult a :: *
-  methodInternal :: (MethodResult a -> IO ()) -> AnyMethodSuffix a
+  type MethodResultFst a :: *
+  type MethodResultSnd a :: *
+  methodInternal :: ((MethodResultFst a, MethodResultSnd a) -> IO ()) -> AnyMethodSuffix a
 
 instance (MethodSignature b, Marshal a, CanGetFrom a ~ Yes) => MethodSignature (a -> b) where
-  type MethodResult (a -> b) = MethodResult b
+  type MethodResultFst (a -> b) = MethodResultFst b
+  type MethodResultSnd (a -> b) = MethodResultSnd b
   methodInternal callback = case methodInternal callback of
     AnyMethodSuffix ms -> AnyMethodSuffix $ \f x -> ms $ fmap ($ x) f
 
 instance (CanReturnTo b ~ Yes, Marshal b) => MethodSignature (a,b) where
-  type MethodResult (a,b) = (a,b)
+  type MethodResultFst (a,b) = a
+  type MethodResultSnd (a,b) = b
   methodInternal callback = AnyMethodSuffix $ \v -> v >>= \r -> snd r <$ callback r
 
 method :: (MethodSignature s, MonadIO m, MonadAppHost t m)
-       => String -> Dynamic t s -> ObjectT m (Event t (MethodResult s))
+       => String -> Dynamic t s -> ObjectT m (Event t (MethodResultFst s, MethodResultSnd s))
 method name funD = do
   (event, fire) <- lift newExternalEvent
   tellDefM $ do
@@ -91,3 +102,7 @@ method name funD = do
       , objRegister (\_ -> performEvent_ $ liftIO . writeIORef ref <$> updated funD)
       ]
   return event
+
+methodVoid :: (MonadIO m, MonadAppHost t m, MethodSignature s)
+           => String -> Dynamic t s -> ObjectT m (Event t (MethodResultFst s))
+methodVoid name funD = fmap fst <$> method name funD

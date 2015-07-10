@@ -15,8 +15,17 @@ Item {
         }
 
         Item {
-            width: childrenRect.width
-            height: childrenRect.height
+            width: 500
+            height: input.height
+
+            TextField {    
+                id: input
+                font.pixelSize: label.font.pixelSize
+                anchors.fill: parent
+                text: modelData.description
+                onAccepted: { modelData.description = text; modelData.editing = false; }
+                opacity: 0
+            }
 
             Text {
                 id: label
@@ -24,23 +33,20 @@ Item {
 
                 MouseArea {
                     id: mouse
-                    onDoubleClicked: modelData.editing = true
+                    anchors.fill: parent
+                    onDoubleClicked: {
+                        modelData.editing = true;
+                    }
                 }
-            }
-
-            TextField {
-                id: input
-                anchors.fill: label
-                visible: false
             }
 
             states:
             [ State {
                 name: "EDITING"
                 when: modelData.editing
-                PropertyChanges { target: checkBox; visible: false }
-                PropertyChanges { target: label; visible: false }
-                PropertyChanges { target: input; visible: true }
+                PropertyChanges { target: checkBox; opacity: 0 }
+                PropertyChanges { target: label; opacity: 0 }
+                PropertyChanges { target: input; opacity: 1 }
             }
             ]
         }
