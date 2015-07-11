@@ -60,6 +60,9 @@ data Removable t a = Removable
   , removableValue :: a
   }
 
+_removableValue :: Applicative f => (a -> f b) -> Removable t a -> f (Removable t b)
+_removableValue f (Removable x a) = Removable x <$> f a
+
 list :: forall t m a. (Reflex t, MonadHold t m, MonadSample t m, MonadFix m)
      => [Removable t a] -> m (Dynamic t [Removable t a])
 list items = mdo
@@ -85,12 +88,14 @@ main = do
   startEventLoop
   requireEventLoop $ hostQmlApp engineConfig $ Prop.namespace "app" $ mdo
     newItem <- Prop.methodVoid "newItem" . constDyn $ \x -> (x,())
-    todoItems <- lift . fmap joinDyn $ holdAppHost (return $ constDyn []) $
+    todoItemsM <- lift . fmap joinDyn $ holdAppHost (return $ constDyn []) $
      ffor newItem $ \x -> do
-      (obj, (removedE, todoD)) <- runObjectT $ makeItem x
+      (activate, (obj, (removedE, todoD))) <- collectPostActions . runObjectT $ makeItem x
       alive <- holdDyn True $ False <$ removedE
-      oldItems <- sample $ current todoItems
-      list (Removable alive (obj, todoD) : oldItems)
+      oldItems <- sample $ current todoItemsM
+      list (Removable alive ((obj, todoD) <$ performPostBuild_ activate) : oldItems)
+    todoItems <- lift $ holdAppHost (return []) $
+      mapM (_removableValue id) <$> updated todoItemsM
     Prop.readonly "todos" =<< mapDyn (reverse . map (fst . removableValue)) todoItems
     todoFilter <- Prop.namespace "filter" $ do
       completedE <- Prop.methodVoid "completed" $ constDyn ((),())
