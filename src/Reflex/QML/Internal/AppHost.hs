@@ -20,6 +20,7 @@ import Data.Dependent.Sum
 import Data.IORef
 import Data.Maybe
 import Data.Semigroup.Applicative
+import Data.Tuple
 import Prelude
 import Reflex.Class hiding (constant)
 import Reflex.Dynamic
@@ -149,7 +150,7 @@ class (ReflexHost t, MonadSample t m, MonadHold t m, MonadReflexCreateTrigger t 
   getAsyncFire :: m ([DSum (EventTrigger t)] -> IO ())
   performPostBuild_ :: HostFrame t (AppInfo t) -> m ()
   dynAppHost :: Dynamic t (m a) -> m (Event t a)
-  collectPostActions :: m a -> m (m (), a)
+  collectPostActions :: m a -> m (HostFrame t (AppInfo t), a)
 
 instance (ReflexHost t, MonadIO (HostFrame t)) => MonadAppHost t (AppHost t) where
   getAsyncFire = AppHost $ fmap liftIO . writeChan . envEventChan <$> ask
@@ -167,8 +168,8 @@ instance (ReflexHost t, MonadIO (HostFrame t)) => MonadAppHost t (AppHost t) whe
 
   collectPostActions (AppHost app) = do
     env <- AppHost ask
-    (r, minfo) <- AppHost . lift . lift . runWriterT $ runReaderT app env
-    return (AppHost $ tell minfo, r)
+    (r, Ap minfo) <- AppHost . lift . lift . runWriterT . flip runReaderT env $ app
+    return (minfo, r)
 
 appInfoEvents :: (Reflex t, Applicative (HostFrame t))
               => AppInfo t -> (Event t (AppPerformAction t), Event t ())
@@ -220,6 +221,6 @@ performEvent event = do
 
 holdAppHost :: MonadAppHost t m => m a -> Event t (m a) -> m (Dynamic t a)
 holdAppHost mInit mChanged = do
-  (applyPostActions, aInit) <- collectPostActions mInit
-  aChanged <- dynAppHost =<< holdDyn (aInit <$ applyPostActions) mChanged
+  (postActions, aInit) <- collectPostActions mInit
+  aChanged <- dynAppHost =<< holdDyn (aInit <$ performPostBuild_ postActions) mChanged
   holdDyn aInit aChanged
