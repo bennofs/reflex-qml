@@ -8,7 +8,6 @@ Window {
     color: "lightgray"
     title: "TodoMVC: reflex + QML"
     Component.onCompleted: window.show()
-//    StaticModel { id: app }
 
     ColumnLayout {
         anchors {
@@ -53,7 +52,9 @@ Window {
             Layout.fillHeight: true
             Layout.fillWidth: true
             model: app.todos
-            delegate: TodoItem {}
+            delegate: TodoItem {
+                width: parent.width
+            }
         }
 
         RowLayout {
@@ -71,20 +72,24 @@ Window {
                     
                     Button {
                         text: "all"
+                        onClicked: app.filter.all()
                     }
                     
                     Button {
                         text: "active"
+                        onClicked: app.filter.active()
                     }
                     
                     Button {
                         text: "completed"
+                        onClicked: app.filter.completed()
                     }
                 }
             }
 
             Button {
                 text: "Clear completed"
+                onClicked: app.clearCompleted()
             }
 
 

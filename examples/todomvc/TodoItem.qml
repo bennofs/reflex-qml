@@ -1,27 +1,33 @@
 import QtQuick 2.2
 import QtQuick.Controls 1.2
 import QtQuick.Controls.Styles 1.2
+import QtQuick.Layouts 1.1
 
 Item {
     id: root
     height: childrenRect.height
-    width: childrenRect.width
+    Layout.minimumWidth: layout.Layout.minimumWidth
 
-    Row {
+    RowLayout {
+        id: layout
+        width: parent.width
+
         CheckBox {
             id: checkBox
+            style: CheckBoxStyle { spacing: 10 }
             checked: modelData.completed
-            style: CheckBoxStyle { spacing: 10 } 
+            onClicked: modelData.completed = checked
         }
 
         Item {
-            width: 500
+            Layout.fillWidth: true
+            Layout.minimumWidth: label.width
             height: input.height
 
             TextField {    
                 id: input
                 font.pixelSize: label.font.pixelSize
-                anchors.fill: parent
+                width: parent.width
                 text: modelData.description
                 onAccepted: { modelData.description = text; modelData.editing = false; }
                 opacity: 0
@@ -30,6 +36,8 @@ Item {
             Text {
                 id: label
                 text: modelData.description
+                height: parent.height
+                verticalAlignment: Qt.AlignVCenter
 
                 MouseArea {
                     id: mouse
@@ -50,5 +58,11 @@ Item {
             }
             ]
         }
+
+        Button {
+            text: "Remove"
+            onClicked: modelData.remove()
+        }
+
     }
 }

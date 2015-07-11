@@ -19,6 +19,7 @@ import Reflex.QML.Internal.AppHost
 import Reflex.QML.Internal.Object
 import Reflex.QML.Internal.Run
 
+import qualified Data.Map as Map
 import qualified Data.Text as Text
 import qualified Reflex.QML.Prop as Prop
 
@@ -26,7 +27,7 @@ data TodoItem = TodoItem
   { description :: Text.Text
   , completed :: Bool
   , editing :: Bool
-  }
+  } deriving Show
 
 engineConfig :: EngineConfig
 engineConfig = defaultEngineConfig
@@ -50,8 +51,8 @@ makeItem desc = mdo
   todoD <- $(qDyn
    [| TodoItem
       $(unqDyn [| descriptionD |])
-      $(unqDyn [| editingD |])
       $(unqDyn [| completedD |])
+      $(unqDyn [| editingD |])
    |])
   return (removedE, todoD)
 
@@ -65,20 +66,25 @@ _removableValue f (Removable x a) = Removable x <$> f a
 
 list :: forall t m a. (Reflex t, MonadHold t m, MonadSample t m, MonadFix m)
      => [Removable t a] -> m (Dynamic t [Removable t a])
-list items = mdo
-  let
-    isAlive :: Removable t a -> PushM t Bool
-    isAlive = sample . current . removableAlive
-
-    filterAlive :: () -> [Removable t a] -> PushM t [Removable t a]
-    filterAlive = const $ filterM isAlive
-
-  itemsDyn <- foldDynM filterAlive items removedE
-  removedE <- fmap (switch . current) $
-    mapDyn (leftmost . map (void . updated . removableAlive)) itemsDyn
-  pure itemsDyn
+list items = do
+  let numbered = Map.fromList $ zip [(0 :: Int)..] items
+      removeE = void . updated . removableAlive
+  dyn <- foldDyn (flip Map.difference) numbered $ mergeMap $ fmap removeE numbered
+  mapDyn Map.elems dyn
 
 data TodoFilter = FilterAll | FilterActive | FilterCompleted
+
+checkFilter :: TodoFilter -> TodoItem -> Bool
+checkFilter FilterAll = const True
+checkFilter FilterActive = not . completed
+checkFilter FilterCompleted = completed
+
+filterTodoList :: TodoFilter -> [(a, TodoItem)] -> [(a, TodoItem)]
+filterTodoList f = filter $ checkFilter f . snd
+
+joinMapDynList :: MonadAppHost t m => (a -> [Dynamic t b]) -> Dynamic t a -> m (Dynamic t [b])
+joinMapDynList f =
+  mapDyn (Map.fromList . zip [(0::Int)..] . f) >=> mapDyn Map.elems . joinDynThroughMap
 
 main :: IO ()
 main = do
@@ -88,12 +94,23 @@ main = do
     todoItemsM <- lift . fmap joinDyn $ holdAppHost (return $ constDyn []) $
      ffor newItem $ \x -> do
       (activate, (obj, (removedE, todoD))) <- collectPostActions . runObjectT $ makeItem x
-      alive <- holdDyn True $ False <$ removedE
+      let clearE = flip push clearCompletedE $ \() -> do
+            item <- sample $ current todoD
+            return $ if completed item then Just () else Nothing
+      alive <- holdDyn True $ False <$ leftmost [removedE, clearE]
       oldItems <- sample $ current todoItemsM
-      list (Removable alive ((obj, todoD) <$ performPostBuild_ activate) : oldItems)
-    todoItems <- lift $ holdAppHost (return []) $
+      objTodoD <- mapDyn (obj,) todoD
+      list (Removable alive (objTodoD <$ performPostBuild_ activate) : oldItems)
+    todoDItems <- lift $ holdAppHost (return []) $
       mapM (_removableValue id) <$> updated todoItemsM
-    Prop.readonly "todos" =<< mapDyn (reverse . map (fst . removableValue)) todoItems
+    allTodoItems <- lift $ joinMapDynList (map removableValue) todoDItems
+    lift . performEvent_ $ liftIO . print . map snd <$> updated allTodoItems
+    filteredTodoItems <- combineDyn filterTodoList currentFilter allTodoItems
+    Prop.readonly "todos" =<< mapDyn (reverse . map fst) filteredTodoItems
+
+    itemsLeft <- mapDyn (length . filterTodoList FilterActive) allTodoItems
+    Prop.readonly "itemsLeft" itemsLeft
+
     todoFilter <- Prop.namespace "filter" $ do
       completedE <- Prop.methodVoid "completed" $ constDyn ((),())
       allE       <- Prop.methodVoid "all" $ constDyn ((),())
@@ -103,4 +120,7 @@ main = do
        , FilterActive    <$ activeE
        , FilterAll       <$ allE
        ]
+    currentFilter <- holdDyn FilterAll todoFilter
+
+    clearCompletedE <- Prop.methodVoid "clearCompleted" $ constDyn ((), ())
     return ()
