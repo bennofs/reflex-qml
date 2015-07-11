@@ -67,16 +67,13 @@ list :: forall t m a. (Reflex t, MonadHold t m, MonadSample t m, MonadFix m)
      => [Removable t a] -> m (Dynamic t [Removable t a])
 list items = mdo
   let
-    removedItems :: Event t [Removable t a]
-    removedItems = pushAlways (const $ filterM isAlive =<< currentItems) removedE
-
     isAlive :: Removable t a -> PushM t Bool
     isAlive = sample . current . removableAlive
 
-    currentItems :: PushM t [Removable t a]
-    currentItems = sample $ current itemsDyn
+    filterAlive :: () -> [Removable t a] -> PushM t [Removable t a]
+    filterAlive = const $ filterM isAlive
 
-  itemsDyn <- holdDyn items removedItems
+  itemsDyn <- foldDynM filterAlive items removedE
   removedE <- fmap (switch . current) $
     mapDyn (leftmost . map (void . updated . removableAlive)) itemsDyn
   pure itemsDyn
