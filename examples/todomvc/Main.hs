@@ -91,24 +91,23 @@ main = do
   startEventLoop
   requireEventLoop $ hostQmlApp engineConfig $ Prop.namespace "app" $ mdo
     newItem <- Prop.methodVoid "newItem" . constDyn $ \x -> (x,())
-    todoItemsM <- lift . fmap joinDyn $ holdAppHost (return $ constDyn []) $
+
+    todoItems <- lift . fmap joinDyn $ holdAppHost (return $ constDyn []) $
      ffor newItem $ \x -> do
-      (activate, (obj, (removedE, todoD))) <- collectPostActions . runObjectT $ makeItem x
+      (obj, (removedE, todoD)) <- runObjectT $ makeItem x
       let clearE = flip push clearCompletedE $ \() -> do
             item <- sample $ current todoD
             return $ if completed item then Just () else Nothing
       alive <- holdDyn True $ False <$ leftmost [removedE, clearE]
-      oldItems <- sample $ current todoItemsM
+      oldItems <- sample $ current todoItems
       objTodoD <- mapDyn (obj,) todoD
-      list (Removable alive (objTodoD <$ performPostBuild_ activate) : oldItems)
-    todoDItems <- lift $ holdAppHost (return []) $
-      mapM (_removableValue id) <$> updated todoItemsM
-    allTodoItems <- lift $ joinMapDynList (map removableValue) todoDItems
-    lift . performEvent_ $ liftIO . print . map snd <$> updated allTodoItems
-    filteredTodoItems <- combineDyn filterTodoList currentFilter allTodoItems
-    Prop.readonly "todos" =<< mapDyn (reverse . map fst) filteredTodoItems
+      list (Removable alive objTodoD : oldItems)
+    allTodoItems <- lift $ joinMapDynList (map removableValue) todoItems
 
-    itemsLeft <- mapDyn (length . filterTodoList FilterActive) allTodoItems
+    filteredTodoItems <- combineDyn filterTodoList currentFilter allTodoItems
+    Prop.readonly "todos" =<< mapDyn (fmap reverse . traverse fst) filteredTodoItems
+
+    itemsLeft <- mapDyn (pure . length . filterTodoList FilterActive) allTodoItems
     Prop.readonly "itemsLeft" itemsLeft
 
     todoFilter <- Prop.namespace "filter" $ do

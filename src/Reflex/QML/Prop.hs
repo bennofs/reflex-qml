@@ -27,13 +27,16 @@ import Reflex hiding (constant)
 import Reflex.QML.Internal.AppHost
 import Reflex.QML.Internal.Object
 
-constant :: (Marshal a, CanReturnTo a ~ Yes, Monad m) => String -> a -> ObjectT m ()
-constant name val = tellDefM . pure . objMember $ defPropertyConst' name (\_ -> return val)
+constant :: (Marshal a, CanReturnTo a ~ Yes, Monad m) => String -> Object m a -> ObjectT m ()
+constant name oval = do
+  val <- lift $ registerObjectEvents oval
+  tellDefM . pure . objMember $ defPropertyConst' name (\_ -> return val)
 
 readonly :: (Marshal a, CanReturnTo a ~ Yes, MonadAppHost t m)
-         => String -> Dynamic t a -> ObjectT m ()
-readonly name valD = do
+         => String -> Dynamic t (Object m a) -> ObjectT m ()
+readonly name ovalD = do
   sig <- liftIO newSignalKey
+  valD <- lift $ dynRegisterObjectEvents ovalD
   tellDefM $ do
     currentRef <- liftIO . newIORef =<< sample (current valD)
     pure $ mconcat
@@ -44,10 +47,11 @@ readonly name valD = do
       ]
 
 mutable :: (Marshal a, CanReturnTo a ~ Yes, CanGetFrom a ~ Yes, MonadAppHost t m)
-        => String -> Dynamic t a -> ObjectT m (Event t a)
-mutable name valD = do
+        => String -> Dynamic t (Object m a) -> ObjectT m (Event t a)
+mutable name ovalD = do
   (event, fire) <- lift newExternalEvent
   sig <- liftIO newSignalKey
+  valD <- lift $ dynRegisterObjectEvents ovalD
   tellDefM $ do
     ref <- liftIO . newIORef =<< sample (current valD)
     pure $ mconcat
@@ -61,8 +65,8 @@ mutable name valD = do
 mutableHold :: (Marshal a, CanReturnTo a ~ Yes, CanGetFrom a ~ Yes, MonadAppHost t m)
             => String -> a -> ObjectT m (Dynamic t a)
 mutableHold name initial = mdo
-  valD <- holdDyn initial changed
-  changed <- mutable name valD
+  valD <- holdDyn initial $ changed
+  changed <- mutable name =<< mapDyn pure valD
   pure valD
 
 namespace :: MonadIO m => String -> ObjectT m a -> ObjectT m a

@@ -32,7 +32,8 @@ hostQmlApp config app = liftIO . handle handleExitException $ do
   -- (we can't run use runEngineAsync because then we don't know when to stop),
   -- a thread is used to process the reflex events.
   let reflexThread = do
-        runSpiderHost $ hostApp $ execObjectT app >>= liftIO . putMVar objVar
+        runSpiderHost $ hostApp $
+          execObjectT app >>= registerObjectEvents >>= liftIO . putMVar objVar
         throwTo mainThreadId ApplicationExited
 
   -- Now start the reflex thread and run the QML engine in the main thread after the
