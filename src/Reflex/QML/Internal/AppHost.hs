@@ -94,10 +94,32 @@ infoQuit :: Applicative (HostFrame t) => DL.DList (Event t ()) -> AppInfo t
 infoQuit x = mempty { eventsToQuit = x }
 
 -- | Produce an 'AppInfo' which only contains 'triggersToFire'.
-infoToFire :: Applicative (HostFrame t)
+infoFire :: Applicative (HostFrame t)
            => HostFrame t (DL.DList (DSum (EventTrigger t))) -> AppInfo t
-infoToFire x = mempty { triggersToFire = Ap x }
+infoFire x = mempty { triggersToFire = Ap x }
 
+appInfoEvents :: (Reflex t, Applicative (HostFrame t))
+              => AppInfo t -> (Event t (AppPerformAction t), Event t ())
+appInfoEvents AppInfo{..} =
+  ( mergeWith (liftA2 (<>)) $ DL.toList eventsToPerform
+  , leftmost $ DL.toList eventsToQuit
+  )
+
+switchAppInfo :: (ReflexHost t, MonadHold t m, Reflex t)
+              => AppInfo t -> Event t (AppInfo t) -> m (AppInfo t)
+switchAppInfo initialInfo updatedInfo = do
+  toPerform <- switch <$> hold initialToPerform updatedToPerform
+  toQuit    <- switch <$> hold initialToQuit updatedToQuit
+  pure $ AppInfo
+    { eventsToPerform = pure toPerform <> pure (getApp . triggersToFire <$> updatedInfo)
+    , eventsToQuit = pure toQuit
+    , triggersToFire = triggersToFire initialInfo
+    }
+ where
+  (updatedToPerform, updatedToQuit) = splitE $ fmap appInfoEvents updatedInfo
+  (initialToPerform, initialToQuit) = appInfoEvents initialInfo
+
+--------------------------------------------------------------------------------
 newtype AppHost t a = AppHost
   { unAppHost :: ReaderT (AppEnv t) (WriterT (Ap (HostFrame t) (AppInfo t)) (HostFrame t)) a
   }
@@ -148,79 +170,72 @@ class (ReflexHost t, MonadSample t m, MonadHold t m, MonadReflexCreateTrigger t 
        MonadIO m, MonadIO (HostFrame t), MonadFix m, MonadFix (HostFrame t))
       => MonadAppHost t m | m -> t where
   getAsyncFire :: m ([DSum (EventTrigger t)] -> IO ())
+  getRunAppHost :: m (m a -> HostFrame t (HostFrame t (AppInfo t), a))
   performPostBuild_ :: HostFrame t (AppInfo t) -> m ()
-  dynAppHost :: Dynamic t (m a) -> m (Event t a)
-  collectPostActions :: m a -> m (HostFrame t (AppInfo t), a)
+  liftHostFrame :: HostFrame t a -> m a
 
 instance (ReflexHost t, MonadIO (HostFrame t)) => MonadAppHost t (AppHost t) where
   getAsyncFire = AppHost $ fmap liftIO . writeChan . envEventChan <$> ask
-
+  getRunAppHost = AppHost $ do
+    env <- ask
+    let rearrange (a, Ap m) = (m, a)
+    pure $ fmap rearrange . runWriterT . flip runReaderT env . unAppHost
   performPostBuild_ mevent = AppHost . tell $ Ap mevent
-
-  dynAppHost appDyn = do
-    env <- AppHost ask
-    (updatedInfo, revent) <- fmap splitE . performEvent $
-      runAppHostFrame env <$> updated appDyn
-    performPostBuild_ $ do
-      initialInfo <- execAppHostFrame env =<< sample (current appDyn)
-      switchAppInfo initialInfo updatedInfo
-    return revent
-
-  collectPostActions (AppHost app) = do
-    env <- AppHost ask
-    (r, Ap minfo) <- AppHost . lift . lift . runWriterT . flip runReaderT env $ app
-    return (minfo, r)
-
-appInfoEvents :: (Reflex t, Applicative (HostFrame t))
-              => AppInfo t -> (Event t (AppPerformAction t), Event t ())
-appInfoEvents AppInfo{..} =
-  ( mergeWith (liftA2 (<>)) $ DL.toList eventsToPerform
-  , leftmost $ DL.toList eventsToQuit
-  )
-
-switchAppInfo :: (ReflexHost t, MonadHold t m, Reflex t)
-              => AppInfo t -> Event t (AppInfo t) -> m (AppInfo t)
-switchAppInfo initialInfo updatedInfo = do
-  toPerform <- switch <$> hold initialToPerform updatedToPerform
-  toQuit    <- switch <$> hold initialToQuit updatedToQuit
-  pure $ AppInfo
-    { eventsToPerform = pure toPerform <> pure (getApp . triggersToFire <$> updatedInfo)
-    , eventsToQuit = pure toQuit
-    , triggersToFire = triggersToFire initialInfo
-    }
- where
-  (updatedToPerform, updatedToQuit) = splitE $ fmap appInfoEvents updatedInfo
-  (initialToPerform, initialToQuit) = appInfoEvents initialInfo
+  liftHostFrame = AppHost . lift . lift
 
 --------------------------------------------------------------------------------
-newEventWithFire :: (MonadIO n, MonadAppHost t m)
-                => (DL.DList (DSum (EventTrigger t)) -> n b)
-                -> m (Event t a, a -> n b)
-newEventWithFire trigger = do
+newEventWithConstructor
+  :: MonadAppHost t m => m (Event t a, a -> IO (Maybe (DSum (EventTrigger t))))
+newEventWithConstructor = do
   ref <- liftIO $ newIORef Nothing
   event <- newEventWithTrigger (\h -> writeIORef ref Nothing <$ writeIORef ref (Just h))
-  return (event, \a -> trigger . F.foldMap (pure . (:=> a)) =<< liftIO (readIORef ref))
+  return (event, \a -> fmap (:=> a) <$> liftIO (readIORef ref))
 
 newExternalEvent :: MonadAppHost t m => m (Event t a, a -> IO Bool)
 newExternalEvent = do
   asyncFire <- getAsyncFire
-  newEventWithFire $ \triggers -> let l = DL.toList triggers in null l <$ asyncFire l
+  (event, construct) <- newEventWithConstructor
+  return (event, fmap isJust . traverse (asyncFire . pure) <=< construct)
 
 performEventAndTrigger_ :: MonadAppHost t m => Event t (AppPerformAction t) -> m ()
-performEventAndTrigger_ event = performPostBuild_ $ pure mempty
-  { eventsToPerform = pure event }
+performEventAndTrigger_ = performPostBuild_ . pure . infoPerform . pure
 
 performEvent_ :: MonadAppHost t m => Event t (HostFrame t ()) -> m ()
-performEvent_ event = performEventAndTrigger_ $ fmap (mempty <$) event
+performEvent_ = performEventAndTrigger_ . fmap (mempty <$)
 
 performEvent :: MonadAppHost t m => Event t (HostFrame t a) -> m (Event t a)
 performEvent event = do
-  (result, fire) <- newEventWithFire return
-  performEventAndTrigger_ $ (fire =<<) <$> event
+  (result, construct) <- newEventWithConstructor
+  performEventAndTrigger_ $ (fmap (F.foldMap pure) . liftIO . construct =<<) <$> event
   return result
+
+runAppHost :: MonadAppHost t m => m a -> m (HostFrame t (AppInfo t), a)
+runAppHost action = liftHostFrame . ($ action) =<< getRunAppHost
+
+switchAppHost :: MonadAppHost t m => HostFrame t (AppInfo t) -> Event t (m a) -> m (Event t a)
+switchAppHost initial event = do
+  run <- getRunAppHost
+  let runWithPost = run >=> \(post, a) -> (,a) <$> post
+  (infoEvent, valueEvent) <- fmap splitE . performEvent $ runWithPost <$> event
+  performPostBuild_ $ flip switchAppInfo infoEvent =<< initial
+  return valueEvent
+
+performAppHost :: MonadAppHost t m => Event t (m a) -> m (Event t a)
+performAppHost = switchAppHost (pure mempty)
+
+dynAppHost :: MonadAppHost t m => Dynamic t (m a) -> m (Event t a)
+dynAppHost dyn = do
+  run <- getRunAppHost
+  (initialEvent, initialConstruct) <- newEventWithConstructor
+  updatedEvent <- flip switchAppHost (updated dyn) $ do
+    (minfo, r) <- sample (current dyn) >>= run
+    info <- minfo
+    trigger <- liftIO $ initialConstruct r
+    pure $ info <> F.foldMap (infoFire . pure . pure) trigger
+  pure $ leftmost [updatedEvent, initialEvent]
 
 holdAppHost :: MonadAppHost t m => m a -> Event t (m a) -> m (Dynamic t a)
 holdAppHost mInit mChanged = do
-  (postActions, aInit) <- collectPostActions mInit
-  aChanged <- dynAppHost =<< holdDyn (aInit <$ performPostBuild_ postActions) mChanged
+  (postActions, aInit) <- runAppHost mInit
+  aChanged <- switchAppHost postActions mChanged
   holdDyn aInit aChanged
