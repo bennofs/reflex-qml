@@ -1,20 +1,16 @@
-env:
- - GHCVER=7.4.2 CABALVER=1.16
- - GHCVER=7.6.3 CABALVER=1.18
- - GHCVER=7.8.3 CABALVER=1.20
- - GHCVER=7.8.4 CABALVER=1.22
- - GHCVER=7.10.1 CABALVER=1.22
- - GHCVER=head   CABALVER=1.22
-
+sudo: false
+cache:
+  directories:
+    - $HOME/hlint
 before_install:
- - sudo add-apt-repository -y ppa:hvr/ghc
- - sudo apt-get update
- - sudo apt-get install cabal-install-$CABALVER ghc-$GHCVER hlint
- - cabal-$CABALVER update
- - cabal-$CABALVER install happy -j
- - export PATH=/opt/ghc/$GHCVER/bin:~/.cabal/bin:$PATH
-
+ - travis_retry cabal-$CABALVER update
+ - export PATH=/opt/ghc/$GHCVER/bin:/opt/happy/1.19.5/bin:/opt/alex/3.1.4/bin:$PATH
 install:
+ - cabal-$CABALVER sandbox init
+ - git clone -b develop https://github.com/ryantrinkle/reflex reflex
+ - git clone https://github.com/bennofs/reflex-host reflex-host
+ - cabal-$CABALVER sandbox add-source $PWD/reflex
+ - cabal-$CABALVER sandbox add-source $PWD/reflex-host
  - cabal-$CABALVER install --only-dependencies --enable-tests --enable-benchmarks -j
 
 script:
@@ -23,5 +19,12 @@ script:
 
 matrix:
   allow_failures:
-   - env: GHCVER=head CABALVER=1.22
+   - env: CABALVER=head GHCVER=head 
+  include:
+    - env: CABALVER=1.18 GHCVER=7.8.4
+      addons: {apt: {packages: [cabal-install-1.18, ghc-7.8.4, alex-3.1.4, happy-1.19.5, hlint], sources: [hvr-ghc]}}
+    - env: CABALVER=1.22 GHCVER=7.10.1
+      addons: {apt: {packages: [cabal-install-1.22, ghc-7.10.1, alex-3.1.4, happy-1.19.5, hlint],sources: [hvr-ghc]}}
+    - env: CABALVER=head GHCVER=head
+      addons: {apt: {packages: [cabal-install-head, ghc-head, alex-3.1.4, happy-1.19.5, hlint],  sources: [hvr-ghc]}}
   fast_finish: true
