@@ -15,9 +15,8 @@ import Control.Monad.Trans
 import Graphics.QML.Engine
 import Prelude
 import Reflex
-import Reflex.QML.Internal.AppHost
-import Reflex.QML.Internal.Object
-import Reflex.QML.Internal.Run
+import Reflex.Host.App
+import Reflex.QML
 
 import qualified Data.Map as Map
 import qualified Data.Text as Text
@@ -42,12 +41,12 @@ startEventLoop = do
       (e :: EventLoopException) `seq` putMVar l ()
   takeMVar l
 
-makeItem :: MonadAppHost t m => Text.Text -> ObjectT m (Event t (), Dynamic t TodoItem)
+makeItem :: MonadAppHost t m => Text.Text -> ObjectBuilder m (Event t (), Dynamic t TodoItem)
 makeItem desc = mdo
   descriptionD <- Prop.mutableHold "description" desc
   completedD <- Prop.mutableHold "completed" False
   editingD <- Prop.mutableHold "editing" False
-  removedE <- void <$> Prop.method "remove" (constDyn ((), ()))
+  removedE <- void <$> Prop.methodConst "remove" Prop.noResult
   todoD <- $(qDyn
    [| TodoItem
       $(unqDyn [| descriptionD |])
@@ -57,18 +56,18 @@ makeItem desc = mdo
   return (removedE, todoD)
 
 data Removable t a = Removable
-  { removableAlive :: Dynamic t Bool
+  { removableRemove :: Event t ()
   , removableValue :: a
   }
 
 _removableValue :: Applicative f => (a -> f b) -> Removable t a -> f (Removable t b)
 _removableValue f (Removable x a) = Removable x <$> f a
 
-list :: forall t m a. (Reflex t, MonadHold t m, MonadSample t m, MonadFix m)
+listRemovable :: forall t m a. (Reflex t, MonadHold t m, MonadSample t m, MonadFix m)
      => [Removable t a] -> m (Dynamic t [Removable t a])
-list items = do
+listRemovable items = do
   let numbered = Map.fromList $ zip [(0 :: Int)..] items
-      removeE = void . updated . removableAlive
+      removeE = void . removableRemove
   dyn <- foldDyn (flip Map.difference) numbered $ mergeMap $ fmap removeE numbered
   mapDyn Map.elems dyn
 
@@ -90,18 +89,17 @@ main :: IO ()
 main = do
   startEventLoop
   requireEventLoop $ hostQmlApp engineConfig $ Prop.namespace "app" $ mdo
-    newItem <- Prop.methodVoid "newItem" . constDyn $ \x -> (x,())
+    newItem <- Prop.methodConst "newItem" $ Prop.haskellResult . return
 
     todoItems <- lift . fmap joinDyn $ holdAppHost (return $ constDyn []) $
      ffor newItem $ \x -> do
-      (obj, (removedE, todoD)) <- runObjectT $ makeItem x
+      (obj, (removedE, todoD)) <- runObjectBuilder $ makeItem x
       let clearE = flip push clearCompletedE $ \() -> do
             item <- sample $ current todoD
             return $ if completed item then Just () else Nothing
-      alive <- holdDyn True $ False <$ leftmost [removedE, clearE]
       oldItems <- sample $ current todoItems
       objTodoD <- mapDyn (obj,) todoD
-      list (Removable alive objTodoD : oldItems)
+      listRemovable (Removable (leftmost [clearE, removedE]) objTodoD : oldItems)
     allTodoItems <- lift $ joinMapDynList (map removableValue) todoItems
 
     filteredTodoItems <- combineDyn filterTodoList currentFilter allTodoItems
@@ -111,9 +109,9 @@ main = do
     Prop.readonly "itemsLeft" itemsLeft
 
     todoFilter <- Prop.namespace "filter" $ do
-      completedE <- Prop.methodVoid "completed" $ constDyn ((),())
-      allE       <- Prop.methodVoid "all" $ constDyn ((),())
-      activeE    <- Prop.methodVoid "active" $ constDyn ((),())
+      completedE <- Prop.methodConst "completed" Prop.noResult
+      allE       <- Prop.methodConst "all" Prop.noResult
+      activeE    <- Prop.methodConst "active" Prop.noResult
       pure $ mergeWith (const . const $ FilterAll)
        [ FilterCompleted <$ completedE
        , FilterActive    <$ activeE
@@ -121,5 +119,5 @@ main = do
        ]
     currentFilter <- holdDyn FilterAll todoFilter
 
-    clearCompletedE <- Prop.methodVoid "clearCompleted" $ constDyn ((), ())
+    clearCompletedE <- Prop.methodConst "clearCompleted" Prop.noResult
     return ()

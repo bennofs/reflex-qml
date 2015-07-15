@@ -91,8 +91,6 @@ Window {
                 text: "Clear completed"
                 onClicked: app.clearCompleted()
             }
-
-
         }
     }   
 }

@@ -27,9 +27,11 @@ module Reflex.QML.Prop
   , mutable
   , mutableHold
   , namespace
-  , method
-  , methodVoid
-  , MethodSignature()
+  , method, methodConst
+  , SimpleResult(), simpleResult
+  , HaskellResult(), haskellResult, noResult
+  , AnnotatedResult(), annotatedResult
+  , MethodSignature(), MethodResult
   ) where
 
 import Control.Monad.Writer
@@ -69,7 +71,7 @@ readonly name ovalD = do
       ]
 
 -- | Add a property that may be read and written from QML. Whenever the property is
--- changed *by QML code*, the returned event is fired. The event is not fired if the
+-- changed /by QML code/, the returned event is fired. The event is not fired if the
 -- property is changed from Haskell code (i.e. the passed Dynamic updated).
 mutable :: (Marshal a, CanReturnTo a ~ Yes, CanGetFrom a ~ Yes, MonadAppHost t m)
         => String -> Dynamic t (Object m a) -> ObjectBuilder m (Event t a)
@@ -120,35 +122,72 @@ data AnyMethodSuffix a = forall ms. MethodSuffix ms => AnyMethodSuffix (IO a -> 
 -- | Class of valid types for QML member methods.
 -- See 'method' for documentation about what types are an instance of this class.
 class MethodSignature a where
-  -- | The first member of the result tuple of the function. A value of this type is
-  -- not passed to QML, but only returned to Haskell.
-  type MethodResultFst a :: *
-
-  -- | The second member of the result tuple of the function. A value of this type is
-  -- passed to QML. This type must therefore be returnable to QML, i.e. it must satisfy
-  -- @CanReturnTo (MethodResultSnd a) ~ Yes@.
-  type MethodResultSnd a :: *
+  -- | The result type of the method. This is the type that is passed back to Haskell.
+  -- The type of the result returned to QML may be different.
+  type MethodResult a :: *
 
   -- | Given a callback that is called with the result of the function and run whenever
   -- the method is called from QML, produce a method suffix that can be passed to
   -- 'defMethod' to create a QML method.
-  methodInternal :: ((MethodResultFst a, MethodResultSnd a) -> IO ()) -> AnyMethodSuffix a
+  methodInternal :: (MethodResult a -> IO ()) -> AnyMethodSuffix a
 
 -- | Funtions are a valid method signature, provided that the result type of the function
 -- is also an instance of 'MethodSignature'.
 instance (MethodSignature b, Marshal a, CanGetFrom a ~ Yes) => MethodSignature (a -> b) where
-  type MethodResultFst (a -> b) = MethodResultFst b
-  type MethodResultSnd (a -> b) = MethodResultSnd b
+  type MethodResult (a -> b) = MethodResult b
   methodInternal callback = case methodInternal callback of
     AnyMethodSuffix ms -> AnyMethodSuffix $ \f x -> ms $ fmap ($ x) f
 
--- | Base case, a function of 0 arguments. It must return a tuple @IO (a,b)@ where @a@ is
--- the value to pass back to Haskell, and @b@ is the value to return to QML.
--- The function may also perform some IO.
-instance (CanReturnTo b ~ Yes, Marshal b) => MethodSignature (IO (a,b)) where
-  type MethodResultFst (IO (a,b)) = a
-  type MethodResultSnd (IO (a,b)) = b
-  methodInternal callback = AnyMethodSuffix $ join >=> \r -> snd r <$ callback r
+-- | An annnotated result. This result type consists of two parts, one part is returned
+-- to Haskell only and the other part is returned to both Haskell and QML.
+-- The Haskell result will be a tuple @(r,a)@.
+--
+-- This can be used to return non-serializable values from method calls to Haskell.
+newtype AnnotatedResult r a = AnnotatedResult { unAnnotatedResult :: IO (r,a) }
+
+-- | A simple result, where the same value is returned to Haskell as is returned to QML.
+newtype SimpleResult a = SimpleResult { unSimpleResult :: IO a }
+
+-- | A void result, only returning a value to Haskell but nothing to QML.
+newtype HaskellResult a = HaskellResult { unHaskellResult :: IO a }
+
+-- | Return an annotated result. The first element of the tuple is the annotation, while
+-- the second element is the actual result returned by the QML method call.
+annotatedResult :: IO (r,a) -> AnnotatedResult r a
+annotatedResult = AnnotatedResult
+
+-- | Build a simple return value. The argument is an IO action that produces the value
+-- returned by the QML method call.
+simpleResult :: IO a -> SimpleResult a
+simpleResult = SimpleResult
+
+-- | Return nothing to QML, but pass a value back to haskell.
+haskellResult :: IO a -> HaskellResult a
+haskellResult = HaskellResult
+
+-- | Return nothing at all, neither to Haskell nor to QML.
+noResult :: HaskellResult ()
+noResult = haskellResult $ return ()
+
+-- | A function of 0 arguments that just returns an annotated result is a valid method
+-- signature.
+instance (CanReturnTo b ~ Yes, Marshal b) => MethodSignature (AnnotatedResult a b) where
+  type MethodResult (AnnotatedResult a b) = (a,b)
+  methodInternal callback = AnyMethodSuffix $
+    (>>= unAnnotatedResult) >=> \r -> snd r <$ callback r
+
+-- | A function of 0 arguments that just returns a simple result is a valid method
+-- signature.
+instance (CanReturnTo b ~ Yes, Marshal b) => MethodSignature (SimpleResult b) where
+  type MethodResult (SimpleResult b) = b
+  methodInternal callback = AnyMethodSuffix $
+    (>>= unSimpleResult) >=> \r -> r <$ callback r
+
+-- | A function of 0 arguments that just returns a void result is a valid method
+-- signature.
+instance MethodSignature (HaskellResult a) where
+  type MethodResult (HaskellResult a) = a
+  methodInternal callback = AnyMethodSuffix $ (>>= unHaskellResult) >=> callback
 
 -- | Add a QML method member to the object. The method can be called from QML, may do
 -- some IO and then return a value.
@@ -157,23 +196,38 @@ instance (CanReturnTo b ~ Yes, Marshal b) => MethodSignature (IO (a,b)) where
 -- that contains the current function to call when the QML method is called.
 --
 -- The @s@ type argument of this function represents the type of the QML member method.
--- It has to be of the form @a1 -> a2 -> ... -> aN -> IO (b,c)@.
+-- It has to be of the form @a1 -> a2 -> ... -> aN -> type (b,c)@, where type is either
+-- 'SimpleResult', 'HaskellResult' or 'AnnotatedResult'.
 -- @a1, a2, ..., aN@ must all be types that can be retrieved from QML
 -- (i.e. for all N, @CanGetFrom aN ~ Yes@). Those are the arguments of the
 -- method (there can also be zero arguments, in which case the type is just
--- @IO (b,c)@. Given the arguments, the method may then perform some IO
--- and return a result tuple. Only the value of type @c@ (second element of the tuple)
--- is used as a return value for the QML method, so it must be returnable to QML
--- (it must satisfy @CanReturnTo c ~ Yes@). Whenever the method is called, the
--- whole result tuple is provided through an Event to haskell though.
+-- @type (b,c)@.
 --
--- The separation is neccessary because you might want to return a value to
--- Haskell that is not serializable and so cannot be returned to QML. For
--- example, if you want to write a method that will open a file and then
--- store the Handle in a Dynamic, you need to return the file handle, but
--- that is not serializable.
+-- __Example types__
+--
+-- @
+-- -- The QML method will have no return value (type: Int -> ())
+-- 'method' :: ('MonadIO' m, 'MonadAppHost' t m) => 'String' -> 'Dynamic' t ('Int' -> 'HaskellResult' 'Int') -> 'ObjectBuilder' m ('Event' t 'Int')
+--
+-- -- The QML method will return an Int (type: Int -> Int)
+-- 'method' :: ('MonadIO' m, 'MonadAppHost' t m) => 'String' -> 'Dynamic' t ('Int' -> 'SimpleResult' 'Int') -> 'ObjectBuilder' m ('Event' t 'Int')
+--
+-- -- The QML method will only return an Int (type: Int -> Int)
+-- 'method' :: ('MonadIO' m, 'MonadAppHost' t m) => 'String' -> 'Dynamic' t (Int -> 'AnnotatedResult' ['String'] 'Int') -> 'ObjectBuilder' m ('Event' t (['String'], 'Int'))
+-- @
+--
+-- __Example usage__
+--
+-- @
+-- -- From todomcv: clearCompletedE is fired whenever the method is called in QML
+-- clearCompletedE <- 'Prop.method' "clearCompleted" . 'constDyn' $ 'Prop.noResult'
+--
+-- -- From todomvc: "newItem" is a QML function that takes a String argument (represented as Text in Haskell.) and has no return value.
+-- -- Whenever newItem is called in QML, the newItem event fires with the corresponding argument.
+-- newItem \<- 'Prop.method' "newItem" . 'constDyn' $ \\desc -\> 'Prop.haskellResult' $ return desc
+-- @
 method :: (MethodSignature s, MonadIO m, MonadAppHost t m)
-       => String -> Dynamic t s -> ObjectBuilder m (Event t (MethodResultFst s, MethodResultSnd s))
+       => String -> Dynamic t s -> ObjectBuilder m (Event t (MethodResult s))
 method name funD = do
   (event, fire) <- lift newExternalEvent
   tellDefM $ do
@@ -186,8 +240,7 @@ method name funD = do
       ]
   return event
 
--- | Wrapper for 'method' for methods that don't return a value to QML.
--- All this does is ignoring the second element of the result event of 'method'.
-methodVoid :: (MonadIO m, MonadAppHost t m, MethodSignature s)
-           => String -> Dynamic t s -> ObjectBuilder m (Event t (MethodResultFst s))
-methodVoid name funD = fmap fst <$> method name funD
+-- | Like 'method', but doesn't support changing the method action.
+methodConst :: (MethodSignature s, MonadIO m, MonadAppHost t m)
+            => String -> s -> ObjectBuilder m (Event t (MethodResult s))
+methodConst name = method name . constDyn

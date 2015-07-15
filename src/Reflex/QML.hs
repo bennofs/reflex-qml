@@ -3,6 +3,7 @@
 -- You probably also want to import 'Reflex.QML.Prop' to create properties.
 module Reflex.QML
   ( hostQmlApp
+  , ObjectBuilder()
   , runObjectBuilder
   , buildObject
   ) where
