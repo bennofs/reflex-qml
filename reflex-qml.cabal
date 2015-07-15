@@ -31,12 +31,18 @@ library
   build-depends:
       base >= 4.4 && < 5
     , reflex
+    , reflex-host
     , hsqml
     , lens
     , mtl
     , async
     , dlist
-    , reducers    
+    , reducers
+    , transformers
+  exposed-modules:
+    Reflex.QML
+    Reflex.QML.Prop
+    Reflex.QML.Internal
 
 test-suite doctests
   type:    exitcode-stdio-1.0
