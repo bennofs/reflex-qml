@@ -1,3 +1,4 @@
+{-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE TypeFamilies #-}
 {-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE FlexibleContexts #-}
@@ -28,7 +29,7 @@ module Reflex.QML.Prop
   , mutableHold
   , namespace
   , method, methodConst
-  , SimpleResult(), simpleResult
+  , SimpleResult(), simpleResult, pureResult
   , HaskellResult(), haskellResult, noResult
   , AnnotatedResult(), annotatedResult
   , MethodSignature(), MethodResult
@@ -147,19 +148,25 @@ newtype AnnotatedResult r a = AnnotatedResult { unAnnotatedResult :: IO (r,a) }
 
 -- | A simple result, where the same value is returned to Haskell as is returned to QML.
 newtype SimpleResult a = SimpleResult { unSimpleResult :: IO a }
+  deriving (Functor, Applicative, Monad)
 
 -- | A void result, only returning a value to Haskell but nothing to QML.
 newtype HaskellResult a = HaskellResult { unHaskellResult :: IO a }
+  deriving (Functor, Applicative, Monad)
 
 -- | Return an annotated result. The first element of the tuple is the annotation, while
 -- the second element is the actual result returned by the QML method call.
-annotatedResult :: IO (r,a) -> AnnotatedResult r a
+annotatedResult :: (Marshal a, CanReturnTo a ~ Yes) => IO (r,a) -> AnnotatedResult r a
 annotatedResult = AnnotatedResult
 
 -- | Build a simple return value. The argument is an IO action that produces the value
 -- returned by the QML method call.
-simpleResult :: IO a -> SimpleResult a
+simpleResult :: (Marshal a, CanReturnTo a ~ Yes) => IO a -> SimpleResult a
 simpleResult = SimpleResult
+
+-- | Build a simple return value from a pure value, without running any IO.
+pureResult :: (Marshal a, CanReturnTo a ~ Yes) => a -> SimpleResult a
+pureResult = SimpleResult . pure
 
 -- | Return nothing to QML, but pass a value back to haskell.
 haskellResult :: IO a -> HaskellResult a

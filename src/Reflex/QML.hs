@@ -6,6 +6,7 @@ module Reflex.QML
   , ObjectBuilder()
   , runObjectBuilder
   , buildObject
+  , Object()
   ) where
 
 import Reflex.QML.Internal
