@@ -1,7 +1,10 @@
 {-# LANGUAGE RankNTypes #-}
+{-# LANGUAGE FlexibleInstances #-}
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 {-# LANGUAGE FlexibleContexts #-}
 {-# LANGUAGE RecordWildCards #-}
+{-# LANGUAGE MultiParamTypeClasses #-}
+{-# LANGUAGE UndecidableInstances #-}
 
 -- | This is the internal module, which exports all functions used to implement this
 -- library. There is no guarrante that functions exported by this module will be
@@ -66,8 +69,12 @@ instance Applicative m => Monoid (ObjectDef m) where
 -- This description can then be converted to a QML object using either 'runObjectBuilder' or
 -- 'buildObject'.
 newtype ObjectBuilder m a = ObjectBuilder { unObjectT :: WriterT (Ap m (ObjectDef m)) m a }
-  deriving (Functor, Applicative, Monad, MonadHold t, MonadSample t,
-            MonadReflexCreateTrigger t, MonadFix, MonadIO)
+  deriving ( Functor, Applicative, Monad, MonadHold t, MonadSample t, MonadFix, MonadIO
+           , MonadSubscribeEvent t )
+
+instance MonadReflexCreateTrigger t m => MonadReflexCreateTrigger t (ObjectBuilder m) where
+  newEventWithTrigger = lift . newEventWithTrigger
+  newFanEventWithTrigger f = lift $ newFanEventWithTrigger f
 
 -- | 'ObjectBuilder' is a monad transformer, so you can still run actions in the
 -- base monad using 'lift'.
@@ -80,7 +87,7 @@ instance MonadTrans ObjectBuilder where
 -- also need to keep track of the FRP events that they depend on (for example,
 -- if your object has a @'Reflex.QML.Prop.readonly' someDyn@ member, then the object
 -- depends on @someDyn@). So instead of giving you a raw object reference, the
--- function instead returns the reference wrapped in the 'Object' monad, which keeps
+-- function returns the reference wrapped in the 'Object' monad, which keeps
 -- track of these dependencies.
 --
 -- Since this type is a Monad, if you have a list of these contexts, you can collapse
@@ -98,7 +105,7 @@ tellDefM = ObjectBuilder . tell . Ap
 -- return a reference to the QML object, but instead wraps in an 'Object' context.
 runObjectBuilder :: MonadIO m => ObjectBuilder m a -> m (Object m AnyObjRef, a)
 runObjectBuilder (ObjectBuilder m) = do
-  (a, ObjectDef{..}) <- traverse getApp =<< runWriterT m
+  (a, ObjectDef{..}) <- traverse getAp =<< runWriterT m
   obj <- liftIO $ newClass (DL.toList members) >>= flip newObject ()
   return (Object $ anyObjRef obj <$ tell (Traversal $ register obj), a)
 
