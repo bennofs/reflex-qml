@@ -11,21 +11,53 @@ before_cache:
 before_install: source travis/setup.sh
 install: travis/install.sh
 script: travis/script.sh
-addons:
-  apt:
-    packages: [libqt5core5a, libqt5qml5, libqt5quick5, libqt5gui5, libqt5quickwidgets5]
-    sources: [ubuntu-sdk-team]
 matrix:
   include:
     - env: GHCVER=7.8.4 CABALVER=1.18
       compiler: ": #GHC 7.8.4"
-      addons: {apt: {packages: [cabal-install-1.18, ghc-7.8.4, alex-3.1.4, happy-1.19.5], sources: [hvr-ghc]}}
+      addons:
+        apt:
+          packages:
+            - cabal-install-1.18
+            - ghc-7.8.4
+            - alex-3.1.4
+            - happy-1.19.5
+            - libqt5core5a
+            - libqt5qml5
+            - libqt5quick5
+            - libqt5gui5
+            - libqt5quickwidgets5
+          sources: [hvr-ghc, ubuntu-sdk-team]
     - env: GHCVER=7.10.2 CABALVER=1.22 ROOT=1
       compiler: ": #GHC 7.10.2"
-      addons: {apt: {packages: [cabal-install-1.22, ghc-7.10.2, alex-3.1.4, happy-1.19.5], sources: [hvr-ghc]}}
+      addons:
+        apt:
+          packages:
+            - cabal-install-1.22
+            - ghc-7.10.2
+            - alex-3.1.4
+            - happy-1.19.5
+            - libqt5core5a
+            - libqt5qml5
+            - libqt5quick5
+            - libqt5gui5
+            - libqt5quickwidgets5
+          sources: [hvr-ghc, ubuntu-sdk-team]
     - env: GHCVER=head CABALVER=head ALLOW_NEWER="template-haskell"
       compiler: ": #GHC head"
-      addons: {apt: {packages: [cabal-install-head, ghc-head, alex-3.1.4, happy-1.19.5], sources: [hvr-ghc]}}
+      addons:
+        apt:
+          packages:
+            - cabal-install-head
+            - ghc-head
+            - alex-3.1.4
+            - happy-1.19.5
+            - libqt5core5a
+            - libqt5qml5
+            - libqt5quick5
+            - libqt5gui5
+            - libqt5quickwidgets5
+          sources: [hvr-ghc, ubuntu-sdk-team]
   allow_failures:
     - compiler: ": #GHC head"
   fast_finish: true
