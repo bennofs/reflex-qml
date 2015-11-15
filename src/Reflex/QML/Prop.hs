@@ -23,18 +23,19 @@
 -- Most functions in this module take the name of the property as the first argument
 -- and the value as second argument.
 module Reflex.QML.Prop
-  ( constant
-  , readonly
-  , mutable
+  ( constant, constantP
+  , readonly, readonlyP
+  , mutable, mutableP
   , mutableHold
   , namespace
-  , method, methodConst
-  , SimpleResult(), simpleResult, pureResult
-  , HaskellResult(), haskellResult, noResult
+  , method, methodConst, methodVoid
+  , SimpleResult(), simpleResult, result
+  , HaskellResult(), haskellResult, haskellResultIO, noResult
   , AnnotatedResult(), annotatedResult
   , MethodSignature(), MethodResult
   ) where
 
+import Control.Monad
 import Control.Monad.Writer
 import Data.IORef
 import Graphics.QML.Marshal
@@ -52,6 +53,11 @@ constant :: (Marshal a, CanReturnTo a ~ Yes, Monad m) => String -> Object m a ->
 constant name oval = do
   val <- lift $ registerObjectEvents oval
   tellDefM . pure . objMember $ defPropertyConst' name (\_ -> return val)
+
+-- | Shorthand for a 'constant' property that only contains primitive marshallable values,
+-- and doesn't contain any objects that may generate signals.
+constantP :: (Marshal a, CanReturnTo a ~ Yes, Monad m) => String -> a -> ObjectBuilder m ()
+constantP name = constant name . pure
 
 -- | Add a property that may be read from QML, but not written to from QML.
 --
@@ -71,6 +77,12 @@ readonly name ovalD = do
           fireSignal sig obj
       ]
 
+-- | Shorthand for a 'readonly' property that doesn't contain any objects, so it only
+-- consists of a primitive marshallable value.
+readonlyP :: (Marshal a, CanReturnTo a ~ Yes, MonadAppHost t m)
+          => String -> Dynamic t a -> ObjectBuilder m ()
+readonlyP name = readonly name <=< mapDyn pure
+
 -- | Add a property that may be read and written from QML. Whenever the property is
 -- changed /by QML code/, the returned event is fired. The event is not fired if the
 -- property is changed from Haskell code (i.e. the passed Dynamic updated).
@@ -89,6 +101,12 @@ mutable name ovalD = do
           fireSignal sig obj
       ]
   pure event
+
+-- | Shorthand for 'mutable' property only containing primitive marshallable values
+-- which cannot contain objects that generate events themselves.
+mutableP :: (Marshal a, CanReturnTo a ~ Yes, CanGetFrom a ~ Yes, MonadAppHost t m)
+         => String -> Dynamic t a -> ObjectBuilder m (Event t a)
+mutableP name = mutable name <=< mapDyn pure
 
 -- | A specialized version of 'mutable' that works like a shared variable: the second
 -- argument is the initial value, and whenever the property is changed from QML, the
@@ -165,16 +183,21 @@ simpleResult :: (Marshal a, CanReturnTo a ~ Yes) => IO a -> SimpleResult a
 simpleResult = SimpleResult
 
 -- | Build a simple return value from a pure value, without running any IO.
-pureResult :: (Marshal a, CanReturnTo a ~ Yes) => a -> SimpleResult a
-pureResult = SimpleResult . pure
+result :: (Marshal a, CanReturnTo a ~ Yes) => a -> SimpleResult a
+result = SimpleResult . pure
 
 -- | Return nothing to QML, but pass a value back to haskell.
-haskellResult :: IO a -> HaskellResult a
-haskellResult = HaskellResult
+haskellResult :: a -> HaskellResult a
+haskellResult = HaskellResult . pure
+
+-- | Like 'haskellResult', but also allows you to perform an IO action to compute
+-- the value.
+haskellResultIO :: IO a -> HaskellResult a
+haskellResultIO = HaskellResult
 
 -- | Return nothing at all, neither to Haskell nor to QML.
 noResult :: HaskellResult ()
-noResult = haskellResult $ return ()
+noResult = haskellResult ()
 
 -- | A function of 0 arguments that just returns an annotated result is a valid method
 -- signature.
@@ -251,3 +274,7 @@ method name funD = do
 methodConst :: (MethodSignature s, MonadIO m, MonadAppHost t m)
             => String -> s -> ObjectBuilder m (Event t (MethodResult s))
 methodConst name = method name . constDyn
+
+-- | Construct a 'method' without any arguments and no return value.
+methodVoid :: (MonadIO m, MonadAppHost t m) => String -> ObjectBuilder m (Event t ())
+methodVoid name = methodConst name noResult
