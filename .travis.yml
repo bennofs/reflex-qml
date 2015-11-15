@@ -26,7 +26,7 @@ matrix:
             - libqt5quick5
             - libqt5gui5
           sources: [hvr-ghc, ubuntu-sdk-team]
-    - env: GHCVER=7.10.2 CABALVER=1.22 ROOT=1 ALLOW_NEWER="tagged filepath"
+    - env: GHCVER=7.10.2 CABALVER=1.22 ROOT=1 ALLOW_NEWER="tagged,filepath"
       compiler: ": #GHC 7.10.2"
       addons:
         apt:
@@ -39,7 +39,7 @@ matrix:
             - libqt5quick5
             - libqt5gui5
           sources: [hvr-ghc, ubuntu-sdk-team]
-    - env: GHCVER=head CABALVER=head ALLOW_NEWER="template-haskell tagged"
+    - env: GHCVER=head CABALVER=head ALLOW_NEWER="template-haskell,tagged"
       compiler: ": #GHC head"
       addons:
         apt:
