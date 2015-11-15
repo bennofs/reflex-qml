@@ -13,7 +13,7 @@ install: travis/install.sh
 script: travis/script.sh
 matrix:
   include:
-    - env: GHCVER=7.8.4 CABALVER=1.18 ALLOW_NEWER="tagged"
+    - env: GHCVER=7.8.4 CABALVER=1.18
       compiler: ": #GHC 7.8.4"
       addons:
         apt:
@@ -26,7 +26,7 @@ matrix:
             - libqt5quick5
             - libqt5gui5
           sources: [hvr-ghc, ubuntu-sdk-team]
-    - env: GHCVER=7.10.2 CABALVER=1.22 ROOT=1 ALLOW_NEWER="tagged"
+    - env: GHCVER=7.10.2 CABALVER=1.22 ROOT=1 ALLOW_NEWER="tagged, filepath"
       compiler: ": #GHC 7.10.2"
       addons:
         apt:
