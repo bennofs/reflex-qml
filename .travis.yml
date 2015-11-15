@@ -9,7 +9,11 @@ before_cache:
   - rm -f $HOME/.cabal/packages/hackage.haskell.org/build-reports.log
   - rm -f $HOME/.cabal/packages/hackage.haskell.org/00-index.tar
 before_install: source travis/setup.sh
-install: travis/install.sh
+install:
+ # Install reflex-host (not yet on hackage)
+ - curl https://github.com/bennofs/reflex-host/archive/master.tar.gz > reflex-host.tar.gz
+ - cabal install reflex-host.tar.gz
+ - travis/install.sh
 script: travis/script.sh
 matrix:
   include:
