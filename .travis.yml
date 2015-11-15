@@ -11,7 +11,7 @@ before_cache:
 before_install: source travis/setup.sh
 install:
  # Install reflex-host (not yet on hackage)
- - curl https://github.com/bennofs/reflex-host/archive/master.tar.gz > reflex-host.tar.gz
+ - curl -L https://github.com/bennofs/reflex-host/archive/master.tar.gz > reflex-host.tar.gz
  - cabal install reflex-host.tar.gz
  - travis/install.sh
 script: travis/script.sh
