@@ -8,7 +8,7 @@ begin_steps
 # we can reuse the cache. Otherwise, we will throw away the cache to avoid interfering with
 # cabal's solver.
 step "Computing install plan" << EOF
-  cabal install --dry -v --only-dependencies --enable-tests --enable-benchmarks ${ALLOW_NEWER:+--allow-newer="$ALLOW_NEWER"} > installplan.txt
+  cabal install --dry -v --only-dependencies --enable-tests --enable-benchmarks ${ALLOW_NEWER:+--allow-newer="$ALLOW_NEWER"} $SOURCE_PACKAGES > installplan.txt
 
   # -v prints things some things we are not interested in, like commands containing random temporary path.
   # The install plan starts after the line "Resolving dependencies...", so we will just delete everything up to that.
@@ -37,6 +37,10 @@ EOF
     cp -a $HOME/.cabal/lib $HOME/.cabal/share $HOME/.cabal/bin installplan.txt $HOME/.cabsnap/
 EOF
 fi
+
+step "Installing source packages" << EOF
+  cabal install -j $SOURCE_PACKAGES
+EOF
 
 if [ ! -z $ROOT ]; then
   step "Computing tool versions" << EOF
