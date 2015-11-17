@@ -4,6 +4,24 @@ set -e
 
 begin_steps
 
+step "Computing build tool versions" << EOF
+  cabal list --simple-output c2hs | grep "^c2hs " | tail -n1 > buildtoolversions.txt
+EOF
+
+if ! diff -u buildtoolversions.txt $HOME/buildtools/buildtoolversions.txt; then
+  step "Installing build tools" << EOF
+    rm -rf $HOME/buildtools
+    mkdir -p $HOME/buildtools
+    cd $HOME/buildtools
+    cabal sandbox init
+    cabal install c2hs
+    ln -s $HOME/buildtools/.cabal-sandbox/bin $HOME/buildtools/bin
+EOF
+  cp buildtoolversions.txt $HOME/buildtools
+fi
+
+export PATH=$PATH:/home/buildtools/bin
+
 # We will first compute cabal's install plan. If it matches the install plan in the cache,
 # we can reuse the cache. Otherwise, we will throw away the cache to avoid interfering with
 # cabal's solver.
