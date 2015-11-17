@@ -8,7 +8,7 @@ begin_steps
 # we can reuse the cache. Otherwise, we will throw away the cache to avoid interfering with
 # cabal's solver.
 step "Computing install plan" << EOF
-  cabal install --dry -v --only-dependencies --enable-tests --enable-benchmarks ${ALLOW_NEWER:+--allow-newer="$ALLOW_NEWER"} $SOURCE_PACKAGES > installplan.txt
+  cabal install --dry -v --only-dependencies --enable-tests --enable-benchmarks ${ALLOW_NEWER:+--allow-newer="$ALLOW_NEWER"} $SOURCE_PACKAGES ./. > installplan.txt
 
   # -v prints things some things we are not interested in, like commands containing random temporary path.
   # The install plan starts after the line "Resolving dependencies...", so we will just delete everything up to that.
@@ -28,7 +28,7 @@ else
   step "Clearing build cache and installing dependencies" << EOF
     rm -rf $HOME/.cabsnap
     mkdir -p $HOME/.ghc $HOME/.cabal/lib $HOME/.cabal/share $HOME/.cabal/bin
-    cabal install --only-dependencies --enable-tests --enable-benchmarks ${ALLOW_NEWER:+--allow-newer="$ALLOW_NEWER"} $SOURCE_PACKAGES
+    cabal install --only-dependencies --enable-tests --enable-benchmarks ${ALLOW_NEWER:+--allow-newer="$ALLOW_NEWER"} $SOURCE_PACKAGES ./.
     if [ "$GHCVER" = "7.10.1" ]; then cabal install Cabal-1.22.4.0; fi
 EOF
   step "Saving build cache" << EOF
