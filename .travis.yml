@@ -5,6 +5,7 @@ cache:
     - $HOME/.cabsnap
     - $HOME/.cabal/packages
     - $HOME/tools
+    - $HOME/buildtools
 before_cache:
   - rm -f $HOME/.cabal/packages/hackage.haskell.org/build-reports.log
   - rm -f $HOME/.cabal/packages/hackage.haskell.org/00-index.tar
