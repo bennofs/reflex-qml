@@ -11,6 +11,7 @@ before_cache:
   - rm -f $HOME/.cabal/packages/hackage.haskell.org/00-index.tar
 before_install: source travis/setup.sh
 install:
+ - pkg-config --list-all
  # Install reflex-host (not yet on hackage)
  - git clone https://github.com/bennofs/reflex-host
  - env SOURCE_PACKAGES="reflex-host/" travis/install.sh
@@ -29,6 +30,7 @@ matrix:
             - libqt5qml5
             - libqt5quick5
             - libqt5gui5
+            - pkg-config
           sources: [hvr-ghc, ubuntu-sdk-team]
     - env: GHCVER=7.10.2 CABALVER=1.22 ROOT=1 ALLOW_NEWER="tagged,filepath"
       compiler: ": #GHC 7.10.2"
@@ -42,6 +44,7 @@ matrix:
             - libqt5qml5
             - libqt5quick5
             - libqt5gui5
+            - pkg-config
           sources: [hvr-ghc, ubuntu-sdk-team]
     - env: GHCVER=head CABALVER=head ALLOW_NEWER="template-haskell,tagged"
       compiler: ": #GHC head"
@@ -55,6 +58,7 @@ matrix:
             - libqt5qml5
             - libqt5quick5
             - libqt5gui5
+            - pkg-config
           sources: [hvr-ghc, ubuntu-sdk-team]
   allow_failures:
     - compiler: ": #GHC head"
