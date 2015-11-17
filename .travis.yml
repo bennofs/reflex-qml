@@ -27,9 +27,7 @@ matrix:
             - ghc-7.8.4
             - alex-3.1.4
             - happy-1.19.5
-            - libqt5qml5
-            - libqt5quick5
-            - libqt5gui5
+            - qt5-default
             - pkg-config
           sources: [hvr-ghc, ubuntu-sdk-team]
     - env: GHCVER=7.10.2 CABALVER=1.22 ROOT=1 ALLOW_NEWER="tagged,filepath"
@@ -41,9 +39,7 @@ matrix:
             - ghc-7.10.2
             - alex-3.1.4
             - happy-1.19.5
-            - libqt5qml5
-            - libqt5quick5
-            - libqt5gui5
+            - qt5-default
             - pkg-config
           sources: [hvr-ghc, ubuntu-sdk-team]
     - env: GHCVER=head CABALVER=head ALLOW_NEWER="template-haskell,tagged"
@@ -55,9 +51,7 @@ matrix:
             - ghc-head
             - alex-3.1.4
             - happy-1.19.5
-            - libqt5qml5
-            - libqt5quick5
-            - libqt5gui5
+            - qt5-default
             - pkg-config
           sources: [hvr-ghc, ubuntu-sdk-team]
   allow_failures:
